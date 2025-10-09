@@ -242,3 +242,4 @@ Located in android-app/src/main/kotlin/com/nfsp00f33r/app/screens/settings/:
 - Material3 design system with dark theme
 - ViewModels for state management (MVVM pattern)
 - All screens access modules via NfSp00fApplication singleton accessors
+- **2025-10-09 09:56:** After completing any task where build is validated as successful, ALWAYS commit changes to git with a descriptive commit message. This ensures progress is saved and provides rollback points if needed.
