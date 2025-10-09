@@ -203,10 +203,27 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                 // Phase 2B Day 1: Use PN532DeviceModule (with timeout and safety check)
                 val realPn532Connected = try {
                     withContext(Dispatchers.IO) {
-                        kotlinx.coroutines.withTimeoutOrNull(500) {
-                            val connected = pn532Module.isConnected()
-                            Timber.d("PN532 connection state: $connected")
-                            connected
+                        kotlinx.coroutines.withTimeoutOrNull(1000) {
+                            // Check if module is initialized and has active connection
+                            val connected = try {
+                                pn532Module.isConnected()
+                            } catch (e: Exception) {
+                                Timber.w("PN532Module not initialized: ${e.message}")
+                                false
+                            }
+                            
+                            // Also check connection state via LiveData
+                            val connectionState = try {
+                                pn532Module.getConnectionState().value
+                            } catch (e: Exception) {
+                                null
+                            }
+                            
+                            val isActuallyConnected = connected && 
+                                (connectionState == com.nfsp00f33r.app.hardware.PN532Manager.ConnectionState.CONNECTED)
+                            
+                            Timber.d("PN532 status: isConnected=$connected, state=$connectionState, actual=$isActuallyConnected")
+                            isActuallyConnected
                         } ?: false // Timeout = not connected
                     }
                 } catch (e: Exception) {

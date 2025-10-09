@@ -412,11 +412,24 @@ private fun HardwareComponentRow(
             status,
             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
             color = when {
-                status.contains("Connected", ignoreCase = true) || status.contains("Active", ignoreCase = true) -> Color(0xFF4CAF50)
-                status.contains("Ready", ignoreCase = true) || status.contains("Available", ignoreCase = true) -> Color(0xFF4CAF50)
-                status.contains("Detected", ignoreCase = true) || status.contains("Found", ignoreCase = true) -> Color(0xFF4CAF50)
-                status.contains("Searching", ignoreCase = true) || status.contains("Connecting", ignoreCase = true) -> Color(0xFFFFC107)
-                status.contains("Error", ignoreCase = true) || status.contains("Failed", ignoreCase = true) || status.contains("Disconnected", ignoreCase = true) -> Color(0xFFF44336)
+                // BLUE for positive states (Connected, Active, Ready)
+                status.contains("Connected", ignoreCase = true) -> Color(0xFF2196F3)
+                status.contains("Active", ignoreCase = true) -> Color(0xFF2196F3)
+                status.contains("Ready", ignoreCase = true) -> Color(0xFF2196F3)
+                status.contains("Available", ignoreCase = true) -> Color(0xFF2196F3)
+                status.contains("Detected", ignoreCase = true) -> Color(0xFF2196F3)
+                status.contains("Found", ignoreCase = true) -> Color(0xFF2196F3)
+                // YELLOW for transition states
+                status.contains("Searching", ignoreCase = true) -> Color(0xFFFFC107)
+                status.contains("Connecting", ignoreCase = true) -> Color(0xFFFFC107)
+                // RED for negative states (Disconnected, Not Available, Error)
+                status.contains("Disconnected", ignoreCase = true) -> Color(0xFFF44336)
+                status.contains("Not Available", ignoreCase = true) -> Color(0xFFF44336)
+                status.contains("Unavailable", ignoreCase = true) -> Color(0xFFF44336)
+                status.contains("Disabled", ignoreCase = true) -> Color(0xFFF44336)
+                status.contains("Error", ignoreCase = true) -> Color(0xFFF44336)
+                status.contains("Failed", ignoreCase = true) -> Color(0xFFF44336)
+                // GRAY for unknown/neutral states
                 else -> Color(0xFF888888)
             },
             textAlign = TextAlign.End
