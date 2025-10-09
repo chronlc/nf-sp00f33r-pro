@@ -29,8 +29,15 @@ import com.nfsp00f33r.app.data.AnalysisResult
 @Composable
 fun AnalysisScreen() {
     var selectedTool by remember { mutableStateOf<AnalysisTool?>(null) }
+    var showFuzzer by remember { mutableStateOf(false) }
+    
+    if (showFuzzer) {
+        TerminalFuzzerScreen()
+        return
+    }
     
     val analysisTools = listOf(
+        AnalysisTool("Terminal Fuzzer", "EMV protocol fuzzing and security testing", Icons.Default.BugReport, true),
         AnalysisTool("TLV Parser", "Parse BER-TLV encoded data", Icons.Default.DataObject, true),
         AnalysisTool("TTQ Analyzer", "Analyze Terminal Transaction Qualifiers", Icons.Default.Settings, true),
         AnalysisTool("PDOL Builder", "Build Processing Data Object List", Icons.Default.Build, true),
@@ -80,7 +87,13 @@ fun AnalysisScreen() {
             // Analysis Tools Grid
             AnalysisToolsSection(
                 tools = analysisTools,
-                onToolSelected = { selectedTool = it }
+                onToolSelected = { tool ->
+                    if (tool.name == "Terminal Fuzzer") {
+                        showFuzzer = true
+                    } else {
+                        selectedTool = tool
+                    }
+                }
             )
             
             // Recent Results
