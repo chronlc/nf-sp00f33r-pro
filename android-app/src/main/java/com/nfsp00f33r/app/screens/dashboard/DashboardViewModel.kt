@@ -103,9 +103,9 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
             try {
                 Timber.i("DashboardViewModel initialization starting...")
                 
-                // PHASE 1: Wait for application initialization (max 3 seconds)
+                // PHASE 1: Wait for application initialization (max 2 seconds)
                 var attempts = 0
-                val maxAttempts = 30 // 30 × 100ms = 3 seconds
+                val maxAttempts = 20 // 20 × 100ms = 2 seconds
                 while (!com.nfsp00f33r.app.application.NfSp00fApplication.isInitializationComplete() && attempts < maxAttempts) {
                     delay(100)
                     attempts++
@@ -114,7 +114,7 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                 if (com.nfsp00f33r.app.application.NfSp00fApplication.isInitializationComplete()) {
                     Timber.i("✅ Application initialized in ${attempts * 100}ms")
                 } else {
-                    Timber.w("⚠️  Application initialization timeout after 3s, proceeding anyway")
+                    Timber.w("⚠️  Application initialization timeout after 2s, proceeding anyway")
                 }
                 
                 // PHASE 2: Hardware detection (with timeout protection)
@@ -201,28 +201,17 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                 }
                 
                 // Phase 2B Day 1: Use PN532DeviceModule (with timeout and safety check)
+                // Simple check - if isConnected() returns true, we're connected
                 val realPn532Connected = try {
                     withContext(Dispatchers.IO) {
-                        kotlinx.coroutines.withTimeoutOrNull(1000) {
-                            // Check if module is initialized and has active hardware adapter
-                            val connected = try {
-                                val isConn = pn532Module.isConnected()
-                                val connState = try { pn532Module.getConnectionState().value } catch (e: Exception) { null }
-                                val connType = try { pn532Module.getConnectionType().value } catch (e: Exception) { null }
-                                
-                                Timber.d("📡 PN532 Check: isConnected=$isConn, state=$connState, type=$connType")
-                                
-                                // Return true only if actually connected
-                                isConn
-                            } catch (e: Exception) {
-                                Timber.w("⚠️  PN532Module check error: ${e.message}")
-                                false
-                            }
+                        kotlinx.coroutines.withTimeoutOrNull(500) {
+                            val connected = pn532Module.isConnected()
+                            Timber.d("📡 PN532 connection state: $connected")
                             connected
-                        } ?: false // Timeout = not connected
+                        } ?: false
                     }
                 } catch (e: Exception) {
-                    Timber.w("❌ PN532 module check failed: ${e.message}")
+                    Timber.w("❌ PN532 module not ready: ${e.message}")
                     false
                 }
                 
@@ -279,14 +268,26 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
     
     /**
      * Start periodic refresh for live updates
+     * Uses 1-second interval to quickly catch PN532 Bluetooth connection
      */
     private fun startPeriodicRefresh() {
         viewModelScope.launch {
+            var refreshCount = 0
             while (true) {
-                delay(3000L) // Refresh every 3 seconds
+                // Refresh every 1 second for first minute (to catch PN532 connection)
+                // Then every 3 seconds for efficiency
+                val refreshInterval = if (refreshCount < 60) 1000L else 3000L
+                delay(refreshInterval)
+                
                 try {
                     setupHardwareStatusPolling() // Update PN532 status
-                    refreshCardData() // Update card statistics
+                    
+                    // Only refresh card data every 3 seconds (less expensive)
+                    if (refreshCount % 3 == 0) {
+                        refreshCardData()
+                    }
+                    
+                    refreshCount++
                 } catch (e: Exception) {
                     Timber.w("Periodic refresh failed: ${e.message}")
                 }
