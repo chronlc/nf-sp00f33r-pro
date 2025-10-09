@@ -1,94 +1,90 @@
-# NF-SP00F33R - EMV Security Research Platform# 🏴‍☠️ nf-sp00f33r Framework
-
-### Professional EMV Research & NFC Security Testing Platform
+# 🏴‍☠️ nf-sp00f33r - EMV Security Research Platform
 
 [![Android](https://img.shields.io/badge/Android-SDK%2028+-brightgreen.svg)](https://developer.android.com/)
+[![Kotlin](https://img.shields.io/badge/Kotlin-1.9.20-blue.svg)](https://kotlinlang.org/)
+[![Material3](https://img.shields.io/badge/Material3-UI-purple.svg)](https://m3.material.io)
+[![License](https://img.shields.io/badge/License-Research-red.svg)](LICENSE)
 
-[![Kotlin](https://img.shields.io/badge/Kotlin-1.9+-blue.svg)](https://kotlinlang.org/)[![Platform](https://img.shields.io/badge/platform-Android-green.svg)](https://android.com)
-
-[![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material3-orange.svg)](https://developer.android.com/jetpack/compose)[![API](https://img.shields.io/badge/API-28%2B-brightgreen.svg?style=flat)](https://android-arsenal.com/api?level=28)
-
-[![Kotlin](https://img.shields.io/badge/100%25-Kotlin-blue.svg)](https://kotlinlang.org)
-
-**Production-grade Android application for EMV contactless card security research and vulnerability analysis.**[![Material3](https://img.shields.io/badge/Material3-UI-purple.svg)](https://m3.material.io)
+**Professional-grade Android application for EMV contactless card security research and vulnerability analysis.**
 
 
 
----> **Advanced EMV Card Research Platform with Professional NFC/HCE Framework**
+---
 
+## 📚 Documentation
 
+**All documentation has been moved to `android-app/` directory:**
 
-## 🎯 Project Overview## 🚀 Framework Overview
+- **[android-app/README.md](android-app/README.md)** - Complete project documentation
+- **[android-app/CHANGELOG.md](android-app/CHANGELOG.md)** - Version history and changes
+- **[android-app/FEATURES.md](android-app/FEATURES.md)** - Current features & future roadmap
+- **[android-app/docs/](android-app/docs/)** - Reference guides (ADB debug, PN532 testing)
 
+---
 
+## 🚀 Quick Start
 
-NF-SP00F33R is an advanced EMV security research platform that enables security researchers to:**nf-sp00f33r** is a sophisticated Android application designed for EMV (Europay, Mastercard, Visa) security research and NFC technology analysis. Built with cutting-edge Material Design 3 and professional-grade architecture, this framework provides researchers with comprehensive tools for payment card security assessment.
+```bash
+# Clone repository
+git clone https://github.com/nf-sp00f33r/nf-sp00f33r.git
+cd nf-sp00f33r/android-app
 
-- **Read and analyze** EMV contactless payment cards (RFID/NFC)
+# Build and install
+./gradlew assembleDebug
+adb install -r build/outputs/apk/debug/android-app-debug.apk
 
-- **Detect vulnerabilities** including ROCA (CVE-2017-15361)### ✨ Key Features
+# Launch application
+adb shell am start -n com.nfsp00f33r.app/.activities.SplashActivity
+```
 
-- **Emulate cards** with various attack payloads
+For detailed setup instructions, see [android-app/README.md](android-app/README.md).
 
-- **Test security** of EMV implementations- **🎯 Professional EMV Analysis**: Complete EMV workflow research with BER-TLV parsing
+---
 
-- **Analyze cryptographic data** from card transactions- **📱 Modern Material3 UI**: Professional interface with Matrix green theme
+## ✨ Key Features
 
-- **🔒 NFC/HCE Framework**: Advanced Host Card Emulation capabilities  
+- 📖 **EMV Card Reading** - Complete contactless card data extraction
+- 🔄 **Host Card Emulation** - Advanced NFC/HCE attack simulation
+- 🛡️ **ROCA Detection** - Automated CVE-2017-15361 scanning
+- 💳 **Attack Modules** - 5 production-grade EMV attack simulations
+- 🔒 **Encrypted Storage** - AES-256-GCM with Android Keystore
+- � **Terminal Fuzzer** - EMV protocol fuzzing with 9 presets
+- 🎨 **Material3 UI** - Professional Compose interface
+- 🔧 **ADB Debug System** - 16 commands for automated testing
+- 🛠️ **PN532 Support** - External NFC hardware integration
 
-### Core Capabilities- **💳 Virtual Card System**: Dynamic card visualization and management
+---
 
-- ✅ **Card Reading**: Full EMV contactless card data extraction- **📊 Real-time APDU Logging**: Comprehensive transaction monitoring
+## 🏗️ Technology Stack
 
-- ✅ **ROCA Detection**: Automatic RSA vulnerability scanning- **🛡️ Attack Module Framework**: Research-grade security testing modules
+- **Language:** 100% Kotlin (null-safe, production-grade)
+- **UI Framework:** Jetpack Compose with Material3
+- **Min SDK:** 28 (Android 9.0+), Target SDK: 34 (Android 14)
+- **Security:** BouncyCastle 1.70, Android Keystore
+- **Database:** Room 2.6.1
+- **EMV Parsing:** BER-TLV 1.0-11
 
-- ✅ **EMV Emulation**: 5 production attack modules (Track2, CVM, AIP, Cryptogram, PPSE)- **🗄️ Database Management**: Professional card profile storage system
+---
 
-- ✅ **Encrypted Storage**: AES-256-GCM with Android Keystore- **📈 Analysis Tools**: Advanced EMV data analysis and visualization
+## 📄 License
 
-- ✅ **Analytics Engine**: Attack success rates, timing analysis, batch scanning
+**Proprietary Security Research Software**
 
-- ✅ **Material3 UI**: Modern Compose interface with dark theme## 🏗️ Architecture
+Copyright © 2025 NF-SP00F33R Project. All rights reserved.
 
+This software is provided for security research and educational purposes only.
 
+---
 
----```
+<div align="center">
 
-📦 nf-sp00f33r Framework
+**🏴‍☠️ Built for Security Researchers by Security Researchers 🏴‍☠️**
 
-## 🏗️ Architecture├── 📱 android-app/          # Main Android application
+*Advancing payment security through responsible research*
 
-│   ├── 🎯 activities/       # Material3 Activities (Main, Splash)
+**Last Updated:** October 9, 2025
 
-### Technology Stack│   ├── 🧩 components/       # UI Components (Cards, Stats, APDU)
-
-- **Language**: Kotlin (100% production-grade, no safe-call operators)│   ├── 📺 screens/          # 5 Professional Screens
-
-- **UI Framework**: Jetpack Compose with Material3│   ├── 💳 cardreading/      # NFC/EMV Reading Infrastructure
-
-- **Min SDK**: 28 (Android 9.0+)│   ├── 🔄 emulation/        # HCE & Attack Modules
-
-- **Target SDK**: 34 (Android 14)│   ├── 🗄️ data/            # Models & Database Layer
-
-- **Build System**: Gradle 8.x│   ├── 🔧 hardware/         # Hardware Abstraction Layer
-
-- **Security**: BouncyCastle, Android Keystore, EncryptedSharedPreferences│   └── 🎨 theme/           # Material3 Design System
-
-├── 📚 docs/                 # Documentation & Research
-
-### Module System (Phase 2A)├── 🛠️ scripts/             # Development Tools
-
-```└── 💾 backups/             # Framework Backups
-
-ModuleRegistry (Centralized Lifecycle)```
-
-├── LoggingModule (Centralized logging with FrameworkLogger)
-
-├── SecureMasterPasswordModule (Keystore-backed encryption keys)## 🖥️ User Interface
-
-├── CardDataStoreModule (AES-256-GCM encrypted card storage)
-
-└── EmulationModule (5 EMV attack modules + analytics)### 5 Professional Screens
+</div>### 5 Professional Screens
 
 ```
 
