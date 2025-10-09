@@ -63,16 +63,37 @@ fun DatabaseScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Card Database",
-                    color = Color(0xFF4CAF50),
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Column {
+                    Text(
+                        text = "Card Database",
+                        color = Color(0xFF4CAF50),
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (viewModel.rocaScanResult != null) {
+                        Text(
+                            viewModel.getRocaScanSummary(),
+                            color = Color(0xFF888888),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
                 
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // ROCA Scan Button
+                    IconButton(
+                        onClick = { viewModel.scanAllCardsForRoca() },
+                        enabled = !viewModel.isRocaScanning
+                    ) {
+                        Icon(
+                            Icons.Default.Security,
+                            contentDescription = "ROCA Scan",
+                            tint = if (viewModel.isRocaScanning) Color(0xFFFFAA00) else Color(0xFF4CAF50)
+                        )
+                    }
+                    
                     IconButton(
                         onClick = { showImportDialog = true }
                     ) {
@@ -138,6 +159,23 @@ fun DatabaseScreen(
                     value = viewModel.encryptedCards.toString(),
                     icon = Icons.Default.Lock,
                     modifier = Modifier.weight(1f)
+                )
+                DatabaseStatCard(
+                    title = "ROCA Vuln",
+                    value = if (viewModel.rocaScanResult != null) {
+                        viewModel.rocaScanResult?.vulnerableCards?.toString() ?: "0"
+                    } else {
+                        "?"
+                    },
+                    icon = Icons.Default.Security,
+                    modifier = Modifier.weight(1f),
+                    valueColor = if (viewModel.rocaScanResult != null && (viewModel.rocaScanResult?.vulnerableCards ?: 0) > 0) {
+                        Color(0xFFF44336)
+                    } else if (viewModel.rocaScanResult != null) {
+                        Color(0xFF4CAF50)
+                    } else {
+                        Color.White
+                    }
                 )
                 DatabaseStatCard(
                     title = "Categories",
@@ -217,7 +255,8 @@ private fun DatabaseStatCard(
     title: String,
     value: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    valueColor: Color = Color.White
 ) {
     Card(
         modifier = modifier,
@@ -236,7 +275,7 @@ private fun DatabaseStatCard(
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 value,
-                color = Color.White,
+                color = valueColor,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -370,6 +409,55 @@ private fun RealDatabaseCardItem(
                 }
                 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // ROCA Vulnerability Badge
+                    val rocaScanResult = viewModel.rocaScanResult
+                    if (rocaScanResult != null) {
+                        val cardResult = rocaScanResult.cardResults.find { it.cardProfile.profileId == cardProfile.id }
+                        val isVulnerable = cardResult?.rocaResult?.isVulnerable == true
+                        val hasRsaKey = cardResult?.hasRsaKey == true
+                        val priority = cardResult?.priority
+                        
+                        if (isVulnerable) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = when (priority) {
+                                        com.nfsp00f33r.app.security.roca.RocaBatchScanner.VulnerabilityPriority.CRITICAL -> Color(0xFFD32F2F)
+                                        com.nfsp00f33r.app.security.roca.RocaBatchScanner.VulnerabilityPriority.HIGH -> Color(0xFFF44336)
+                                        com.nfsp00f33r.app.security.roca.RocaBatchScanner.VulnerabilityPriority.MEDIUM -> Color(0xFFFF9800)
+                                        else -> Color(0xFFF44336)
+                                    }
+                                ),
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text(
+                                    when (priority) {
+                                        com.nfsp00f33r.app.security.roca.RocaBatchScanner.VulnerabilityPriority.CRITICAL -> "CRITICAL"
+                                        com.nfsp00f33r.app.security.roca.RocaBatchScanner.VulnerabilityPriority.HIGH -> "HIGH"
+                                        com.nfsp00f33r.app.security.roca.RocaBatchScanner.VulnerabilityPriority.MEDIUM -> "MEDIUM"
+                                        else -> "VULN"
+                                    },
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (hasRsaKey && !isVulnerable) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50)),
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text(
+                                    "SAFE",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                    
                     if (isEncrypted) {
                         Icon(
                             Icons.Default.Lock,
