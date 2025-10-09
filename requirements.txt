@@ -1,0 +1,5 @@
+# Python Requirements for PN532 Controller
+# Install: pip3 install -r requirements.txt
+
+# PySerial - Serial communication for PN532 via rfcomm0
+pyserial>=3.5
