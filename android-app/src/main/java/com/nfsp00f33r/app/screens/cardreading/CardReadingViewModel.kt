@@ -21,6 +21,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import timber.log.Timber
+import java.security.SecureRandom
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import com.nfsp00f33r.app.cardreading.EmvTlvParser
 
 /**
  * PRODUCTION-GRADE Card Reading ViewModel
@@ -317,12 +322,26 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 return // Don't continue if no AID selected
             }
             
-            // Phase 3: GET PROCESSING OPTIONS (LIVE GPO analysis)
-            currentPhase = "GPO"
-            progress = 0.4f
-            statusMessage = "GET PROCESSING OPTIONS..."
+            // Phase 3: GET PROCESSING OPTIONS with dynamic PDOL data
+            withContext(Dispatchers.Main) {
+                currentPhase = "GPO"
+                progress = 0.4f
+                statusMessage = "GET PROCESSING OPTIONS..."
+            }
             
-            val gpoCommand = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, 0x02, 0x83.toByte(), 0x00)
+            // Extract PDOL from AID selection response
+            val pdolData = extractPdolFromAllResponses(apduLog)
+            val gpoData = if (pdolData.isNotEmpty()) {
+                // Parse PDOL and build dynamic data
+                val dolEntries = EmvTlvParser.parseDol(pdolData)
+                Timber.d("PDOL contains ${dolEntries.size} entries")
+                buildPdolData(dolEntries)
+            } else {
+                // No PDOL - use empty data
+                byteArrayOf(0x83.toByte(), 0x00)
+            }
+            
+            val gpoCommand = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, gpoData.size.toByte()) + gpoData
             val gpoResponse = if (isoDep != null) isoDep.transceive(gpoCommand) else null
             
             if (gpoResponse != null) {
@@ -344,26 +363,54 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                         val aip = extractAipFromResponse(gpoHex)
                         val afl = extractAflFromResponse(gpoHex)
                         
+                        // Parse AIP for capability detection
+                        if (aip.isNotEmpty()) {
+                            val aipCapabilities = EmvTlvParser.parseAip(aip)
+                            aipCapabilities?.let { cap ->
+                                val authMethods = mutableListOf<String>()
+                                if (cap.sdaSupported) authMethods.add("SDA")
+                                if (cap.ddaSupported) authMethods.add("DDA")
+                                if (cap.cdaSupported) authMethods.add("CDA")
+                                
+                                Timber.i("AIP Analysis: Auth=${authMethods.joinToString("/")}, CVM=${cap.cardholderVerificationSupported}, MSD=${cap.msdSupported}")
+                                
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO: ${authMethods.joinToString("/")} ${if (cap.cardholderVerificationSupported) "+CVM" else ""}"
+                                }
+                            }
+                        }
+                        
                         when {
                             extractedPan.isNotEmpty() -> {
-                                statusMessage = "GPO Success: PAN=${extractedPan.take(6)}****${extractedPan.takeLast(4)}"
-                                if (aip.isNotEmpty()) statusMessage += " AIP=$aip"
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO Success: PAN=${extractedPan.take(6)}****${extractedPan.takeLast(4)}"
+                                    if (aip.isNotEmpty()) statusMessage += " AIP=$aip"
+                                }
                                 Timber.i("GPO successful - PAN extracted: ${extractedPan.take(6)}****${extractedPan.takeLast(4)}")
                             }
                             aip.isNotEmpty() || afl.isNotEmpty() -> {
-                                statusMessage = "GPO Success: AIP=$aip AFL=$afl"
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO Success: AIP=$aip AFL=$afl"
+                                }
                                 Timber.i("GPO successful - AIP/AFL extracted")
                             }
                             else -> {
-                                statusMessage = "GPO Success but no EMV data found"
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO Success but no EMV data found"
+                                }
                                 Timber.w("GPO succeeded but no parseable EMV data in response")
                             }
                         }
                         
-                        // Extract AFL for record reading strategy
-                        val recordsToRead = parseAflForRecords(afl)
-                        if (recordsToRead.isNotEmpty()) {
-                            statusMessage += " - ${recordsToRead.size} records to read"
+                        // Parse AFL using EmvTlvParser for dynamic record reading
+                        if (afl.isNotEmpty()) {
+                            val aflEntries = EmvTlvParser.parseAfl(afl)
+                            if (aflEntries.isNotEmpty()) {
+                                withContext(Dispatchers.Main) {
+                                    statusMessage += " - ${aflEntries.size} AFL entries, ${aflEntries.sumOf { it.endRecord - it.startRecord + 1 }} records"
+                                }
+                                Timber.i("AFL parsed: ${aflEntries.size} entries")
+                            }
                         }
                     }
                     "6985" -> {
@@ -384,16 +431,30 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 Timber.e("GPO command failed - no response")
             }
             
-            // Phase 4: READ APPLICATION DATA (LIVE AFL-based reading)
-            currentPhase = "Reading Records"
-            progress = 0.6f
-            statusMessage = "Reading application data..."
+            // Phase 4: READ APPLICATION DATA using AFL-based intelligent reading
+            withContext(Dispatchers.Main) {
+                currentPhase = "Reading Records"
+                progress = 0.6f
+                statusMessage = "Reading application data..."
+            }
             
-            // Get AFL from previous GPO response to determine which records to read
+            // Use EmvTlvParser to parse AFL for intelligent record reading
             val aflFromGpo = extractAflFromAllResponses(apduLog)
             val recordsToRead = if (aflFromGpo.isNotEmpty()) {
-                parseAflForRecords(aflFromGpo)
+                val aflEntries = EmvTlvParser.parseAfl(aflFromGpo)
+                if (aflEntries.isNotEmpty()) {
+                    Timber.i("Using AFL-based record reading: ${aflEntries.size} AFL entries")
+                    aflEntries.flatMap { entry ->
+                        (entry.startRecord..entry.endRecord).map { record ->
+                            Triple(entry.sfi, record, (entry.sfi shl 3) or 0x04)
+                        }
+                    }
+                } else {
+                    // Fallback to parseAflForRecords if EmvTlvParser fails
+                    parseAflForRecords(aflFromGpo)
+                }
             } else {
+                Timber.w("No AFL found - using fallback record locations")
                 // Fallback to common record locations if no AFL
                 listOf(
                     Triple(1, 1, 0x14), Triple(1, 2, 0x14), Triple(1, 3, 0x14),
@@ -708,6 +769,102 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             Timber.e(e, "Error parsing AFL")
         }
         return records
+    }
+    
+    /**
+     * Build dynamic PDOL data based on PDOL requirements from card
+     * Uses SecureRandom for unpredictable number (9F37) and current date (9A)
+     * Proxmark3-inspired dynamic data generation
+     */
+    private fun buildPdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
+        val dataList = mutableListOf<Byte>()
+        val secureRandom = SecureRandom()
+        val dateFormat = SimpleDateFormat("yyMMdd", Locale.US)
+        val currentDate = dateFormat.format(Date())
+        
+        Timber.d("Building PDOL data for ${dolEntries.size} entries")
+        
+        for (entry in dolEntries) {
+            val tagData = when (entry.tag.uppercase()) {
+                "9F37" -> {
+                    // Unpredictable Number - 4 bytes, cryptographically secure random
+                    val un = ByteArray(entry.length)
+                    secureRandom.nextBytes(un)
+                    Timber.d("PDOL: 9F37 (Unpredictable Number) = ${un.joinToString("") { "%02X".format(it) }}")
+                    un
+                }
+                "9A" -> {
+                    // Transaction Date - YYMMDD format
+                    val dateBytes = ByteArray(entry.length)
+                    val dateHex = currentDate.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    System.arraycopy(dateHex, 0, dateBytes, 0, minOf(dateHex.size, entry.length))
+                    Timber.d("PDOL: 9A (Transaction Date) = $currentDate")
+                    dateBytes
+                }
+                "9C" -> {
+                    // Transaction Type - 0x00 for goods/services
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "5F2A" -> {
+                    // Transaction Currency Code - 0x0840 for USD
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "9F02" -> {
+                    // Amount, Authorised - 6 bytes BCD, amount 000000000000 (0.00)
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F03" -> {
+                    // Amount, Other - 6 bytes BCD, usually 0
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F1A" -> {
+                    // Terminal Country Code - 0x0840 for USA
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "9F33" -> {
+                    // Terminal Capabilities - typical POS capabilities
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xE0.toByte() // Manual key entry, Magnetic stripe, IC with contacts
+                            1 -> 0xF0.toByte() // Plaintext PIN, Enciphered PIN online, Signature, Enciphered PIN offline, No CVM
+                            2 -> 0xC8.toByte() // SDA, DDA, Card capture
+                            else -> 0x00
+                        }
+                    }
+                }
+                "9F35" -> {
+                    // Terminal Type - 0x22 for attended online-only
+                    ByteArray(entry.length) { 0x22 }
+                }
+                "9F40" -> {
+                    // Additional Terminal Capabilities - typical POS
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xF0.toByte() // Cash, goods, services, cashback, inquiry, transfer, payment, administrative
+                            1 -> 0x00
+                            2 -> 0xF0.toByte() // Numeric keys, alphabetic, special, command
+                            3 -> 0x00
+                            4 -> 0x00
+                            else -> 0x00
+                        }
+                    }
+                }
+                else -> {
+                    // Unknown tag - fill with zeros
+                    Timber.w("PDOL: Unknown tag ${entry.tag} - filling with zeros")
+                    ByteArray(entry.length) { 0x00 }
+                }
+            }
+            
+            dataList.addAll(tagData.toList())
+        }
+        
+        // Build final PDOL data: 83 [length] [data...]
+        val totalLength = dataList.size
+        val result = byteArrayOf(0x83.toByte(), totalLength.toByte()) + dataList.toByteArray()
+        
+        Timber.i("Built PDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
+        return result
     }
     
     /**
