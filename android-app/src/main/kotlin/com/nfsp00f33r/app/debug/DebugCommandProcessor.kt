@@ -22,6 +22,8 @@ class DebugCommandProcessor(private val context: Context) {
         private const val TAG = "🔧 DebugProcessor"
     }
     
+    private val uiAutomation = UIAutomationCommands(context)
+    
     /**
      * Execute a debug command and return JSON result
      */
@@ -35,6 +37,7 @@ class DebugCommandProcessor(private val context: Context) {
         Timber.d("$TAG Executing command: $command")
         
         return@withContext when (command.lowercase()) {
+            // Backend commands
             "logcat" -> executeLogcatCommand(params)
             "intent" -> executeIntentCommand(params)
             "db" -> executeDatabaseCommand(params)
@@ -42,6 +45,17 @@ class DebugCommandProcessor(private val context: Context) {
             "health" -> executeHealthCommand(params)
             "apdu" -> executeApduCommand(params)
             "roca" -> executeRocaCommand(params)
+            
+            // UI automation commands
+            "dump_ui" -> uiAutomation.dumpUI()
+            "find" -> uiAutomation.findElement(params)
+            "click" -> uiAutomation.clickElement(params)
+            "input" -> uiAutomation.inputText(params)
+            "screenshot" -> uiAutomation.captureScreenshot(params)
+            "hierarchy" -> uiAutomation.dumpHierarchy()
+            "assert_visible" -> uiAutomation.assertVisible(params)
+            "back" -> uiAutomation.navigateBack()
+            
             "help" -> executeHelpCommand()
             else -> createErrorResponse("Unknown command: $command")
         }
@@ -359,41 +373,106 @@ class DebugCommandProcessor(private val context: Context) {
     private fun executeHelpCommand(): JSONObject {
         return createSuccessResponse("help").apply {
             put("commands", JSONArray().apply {
+                // Backend commands
                 put(JSONObject().apply {
                     put("command", "logcat")
+                    put("category", "backend")
                     put("description", "Filter and stream application logs")
                     put("params", "filter, level, lines")
                     put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command logcat --es params '{\"filter\":\"NfSp00f\",\"level\":\"D\",\"lines\":50}'")
                 })
                 put(JSONObject().apply {
                     put("command", "db")
+                    put("category", "backend")
                     put("description", "Database inspection (count/list/get)")
                     put("params", "query, limit, id")
                     put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command db --es params '{\"query\":\"count\"}'")
                 })
                 put(JSONObject().apply {
                     put("command", "state")
+                    put("category", "backend")
                     put("description", "Module health and state validation")
                     put("params", "none")
                     put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command state")
                 })
                 put(JSONObject().apply {
                     put("command", "health")
+                    put("category", "backend")
                     put("description", "Real-time module metrics")
                     put("params", "none")
                     put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command health")
                 })
                 put(JSONObject().apply {
                     put("command", "apdu")
+                    put("category", "backend")
                     put("description", "APDU log inspection")
                     put("params", "card_id, limit")
                     put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command apdu --es params '{\"limit\":20}'")
                 })
                 put(JSONObject().apply {
                     put("command", "roca")
+                    put("category", "backend")
                     put("description", "ROCA scan results")
                     put("params", "none")
                     put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command roca")
+                })
+                
+                // UI automation commands
+                put(JSONObject().apply {
+                    put("command", "dump_ui")
+                    put("category", "ui_automation")
+                    put("description", "Get current screen and view information")
+                    put("params", "none")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command dump_ui")
+                })
+                put(JSONObject().apply {
+                    put("command", "find")
+                    put("category", "ui_automation")
+                    put("description", "Find UI element by text, id, or type")
+                    put("params", "text, id, type")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command find --es params '{\"text\":\"Scan Card\"}'")
+                })
+                put(JSONObject().apply {
+                    put("command", "click")
+                    put("category", "ui_automation")
+                    put("description", "Click UI element or coordinates")
+                    put("params", "text, id, x, y")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command click --es params '{\"text\":\"Scan Card\"}'")
+                })
+                put(JSONObject().apply {
+                    put("command", "input")
+                    put("category", "ui_automation")
+                    put("description", "Input text into element")
+                    put("params", "text, target")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command input --es params '{\"text\":\"test\",\"target\":\"password\"}'")
+                })
+                put(JSONObject().apply {
+                    put("command", "screenshot")
+                    put("category", "ui_automation")
+                    put("description", "Capture screen to file")
+                    put("params", "path")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command screenshot --es params '{\"path\":\"/sdcard/test.png\"}'")
+                })
+                put(JSONObject().apply {
+                    put("command", "hierarchy")
+                    put("category", "ui_automation")
+                    put("description", "Get complete view hierarchy")
+                    put("params", "none")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command hierarchy")
+                })
+                put(JSONObject().apply {
+                    put("command", "assert_visible")
+                    put("category", "ui_automation")
+                    put("description", "Assert element visibility")
+                    put("params", "target, expected")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command assert_visible --es params '{\"target\":\"Dashboard\",\"expected\":true}'")
+                })
+                put(JSONObject().apply {
+                    put("command", "back")
+                    put("category", "ui_automation")
+                    put("description", "Navigate back")
+                    put("params", "none")
+                    put("example", "adb shell am broadcast -a com.nfsp00f33r.app.DEBUG_COMMAND --es command back")
                 })
             })
         }
