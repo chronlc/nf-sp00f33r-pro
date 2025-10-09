@@ -38,10 +38,6 @@ class SplashActivity : ComponentActivity() {
         setContent {
             NfSp00fTheme { SplashScreen(initState.value) }
         }
-
-        // Track when initialization started
-        val initStartTime = System.currentTimeMillis()
-        val minimumDisplayTime = 5000L // Minimum 5 seconds to see progress and messages
         
         // Set up initialization callback - this will also start initialization
         NfSp00fApplication.setInitializationCallback { state ->
@@ -52,18 +48,10 @@ class SplashActivity : ComponentActivity() {
             if (state.isComplete && state.error == null) {
                 android.util.Log.i("SplashActivity", "Initialization complete - transitioning to MainActivity")
                 
-                // Calculate remaining time to meet minimum display time
-                val elapsedTime = System.currentTimeMillis() - initStartTime
-                val remainingTime = (minimumDisplayTime - elapsedTime).coerceAtLeast(500L)
-                
-                android.util.Log.d("SplashActivity", "Elapsed: ${elapsedTime}ms, waiting ${remainingTime}ms more")
-                
-                // Delay to ensure user sees the progress
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    startActivity(Intent(this, com.nfsp00f33r.app.activities.MainActivity::class.java))
-                    overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
-                    finish()
-                }, remainingTime)
+                // Direct transition after organic timing from delays
+                startActivity(Intent(this, com.nfsp00f33r.app.activities.MainActivity::class.java))
+                overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+                finish()
             } else if (state.error != null) {
                 android.util.Log.e("SplashActivity", "Initialization error: ${state.error}")
                 // TODO: Show error dialog or fallback behavior
