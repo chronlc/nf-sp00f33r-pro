@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nfsp00f33r.app.components.VirtualCardView
 import com.nfsp00f33r.app.ui.components.RocaVulnerabilityCard
@@ -138,6 +139,12 @@ private fun StatusHeaderCard(viewModel: CardReadingViewModel) {
                 DataStat("APDUs", "${viewModel.apduLog.size}", Color(0xFFFFB74D))
                 DataStat("NFC", if (com.nfsp00f33r.app.activities.MainActivity.currentNfcTag != null) "DETECTED" else "WAITING", 
                     if (com.nfsp00f33r.app.activities.MainActivity.currentNfcTag != null) Color(0xFF4CAF50) else Color(0xFFE1BEE7))
+                // ROCA vulnerability status
+                DataStat(
+                    "ROCA",
+                    if (viewModel.isRocaVulnerable) "VULN" else if (viewModel.rocaVulnerabilityStatus != "Not checked") "SAFE" else "N/A",
+                    if (viewModel.isRocaVulnerable) Color(0xFFF44336) else if (viewModel.rocaVulnerabilityStatus != "Not checked") Color(0xFF4CAF50) else Color(0xFF666666)
+                )
             }
             
             // NFC Debug Info
@@ -449,11 +456,23 @@ private fun ActiveCardsSection(viewModel: CardReadingViewModel) {
         )
         
         LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(horizontal = 4.dp)
         ) {
-            items(viewModel.scannedCards.take(3)) { card ->
+            items(viewModel.scannedCards) { card ->
                 VirtualCardView(card = card)
             }
+        }
+        
+        // Pagination indicator if more than 3 cards
+        if (viewModel.scannedCards.size > 3) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "${viewModel.scannedCards.size} cards scanned - scroll to view all",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF666666),
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            )
         }
     }
 }
@@ -518,24 +537,73 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        reverseLayout = true
                     ) {
-                        items(viewModel.apduLog.takeLast(12)) { apduEntry ->
-                            Column {
-                                Text(
-                                    ">> ${apduEntry.command}",
-                                    color = Color(0xFF00FF41),
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        items(viewModel.apduLog.takeLast(20)) { apduEntry ->
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                // TX (Transmit) - Command in GREEN
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Text(
+                                        "TX>",
+                                        color = Color(0xFF00FF41),
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        modifier = Modifier.width(35.dp)
                                     )
-                                )
-                                Text(
-                                    "<< ${apduEntry.response} (${apduEntry.statusWord})",
-                                    color = Color(0xFF66BB6A),
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            apduEntry.command,
+                                            color = Color(0xFF00FF41),
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                            )
+                                        )
+                                        Text(
+                                            apduEntry.description,
+                                            color = Color(0xFF666666),
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontSize = 10.sp
+                                            )
+                                        )
+                                    }
+                                }
+                                
+                                // RX (Receive) - Response in BLUE
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Text(
+                                        "RX<",
+                                        color = Color(0xFF2196F3),
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        modifier = Modifier.width(35.dp)
                                     )
-                                )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "${apduEntry.response} [${apduEntry.statusWord}]",
+                                            color = Color(0xFF2196F3),
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                            )
+                                        )
+                                        Text(
+                                            "${apduEntry.executionTimeMs}ms",
+                                            color = Color(0xFF666666),
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontSize = 10.sp
+                                            )
+                                        )
+                                    }
+                                }
+                                
+                                Spacer(modifier = Modifier.height(4.dp))
                             }
                         }
                     }
