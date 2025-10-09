@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    <item
+        android:id="@+id/nav_dashboard"
+        android:icon="@drawable/ic_dashboard"
+        android:title="Dashboard" />
+    
+    <item
+        android:id="@+id/nav_read"
+        android:icon="@drawable/ic_nfc"
+        android:title="Read" />
+    
+    <item
+        android:id="@+id/nav_database"
+        android:icon="@drawable/ic_storage"
+        android:title="Database" />
+    
+    <item
+        android:id="@+id/nav_emulate"
+        android:icon="@drawable/ic_phone_android"
+        android:title="Emulate" />
+    
+    <item
+        android:id="@+id/nav_analysis"
+        android:icon="@drawable/ic_analytics"
+        android:title="Analysis" />
+        
+</menu>

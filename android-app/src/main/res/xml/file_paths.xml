@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Internal app storage for EMV card database -->
+    <files-path name="internal_files" path="." />
+    
+    <!-- Cache directory for temporary APDU logs and exports -->
+    <cache-path name="cache_files" path="." />
+    
+    <!-- External storage for card profile exports and backups -->
+    <external-files-path name="external_files" path="." />
+    <external-cache-path name="external_cache" path="." />
+    
+    <!-- Documents directory for EMV reports and analysis -->
+    <external-path name="external_storage" path="." />
+    
+    <!-- Specific paths for nf-sp00f data -->
+    <files-path name="emv_exports" path="emv_exports/" />
+    <files-path name="apdu_logs" path="apdu_logs/" />
+    <files-path name="card_backups" path="card_backups/" />
+    <cache-path name="temp_files" path="temp/" />
+</paths>

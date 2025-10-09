@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Include EMV card database for backup -->
+    <include domain="database" path="card_profiles.db" />
+    <include domain="shared_pref" path="app_settings.xml" />
+    
+    <!-- Exclude temporary and security-sensitive files -->
+    <exclude domain="files" path="apdu_logs" />
+    <exclude domain="files" path="debug_data" />
+    <exclude domain="files" path="temp" />
+    <exclude domain="cache" />
+    <exclude domain="external-cache" />
+    
+    <!-- Exclude hardware-specific configurations -->
+    <exclude domain="shared_pref" path="hardware_config.xml" />
+    <exclude domain="shared_pref" path="device_specific.xml" />
+</full-backup-content>

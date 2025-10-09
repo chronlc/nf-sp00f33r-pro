@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 
+    HCE Service Configuration for Card Emulation Mode
+    This enables the app to ACT AS a virtual EMV card when scanned by external readers
+    This works independently from Reader Mode (scanning other cards)
+-->
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/hce_service_description"
+    android:requireDeviceUnlock="false"
+    android:settingsActivity=".activities.MainActivity">
+
+    <!-- 
+        EMV Card Emulation AIDs - Category "other" to avoid payment conflicts
+        These AIDs make our app respond when external POS/readers scan our phone
+    -->
+    <aid-group
+        android:category="other"
+        android:description="@string/hce_aid_description">
+        
+        <!-- PPSE (Proximity Payment System Environment) -->
+        <aid-filter android:name="325041592E5359532E4444463031" />  <!-- 2PAY.SYS.DDF01 -->
+        <aid-filter android:name="315041592E5359532E4444463031" />  <!-- 1PAY.SYS.DDF01 -->
+        
+        <!-- Major Card Brand AIDs for Research -->
+        <aid-filter android:name="A0000000031010" />  <!-- VISA MSD -->
+        <aid-filter android:name="A0000000032010" />  <!-- VISA Electron -->
+        <aid-filter android:name="A0000000041010" />  <!-- MasterCard MSD -->
+        <aid-filter android:name="A0000000042010" />  <!-- MasterCard Credit -->
+        <aid-filter android:name="A0000000043010" />  <!-- MasterCard Debit -->
+        <aid-filter android:name="A0000000980840" />  <!-- US Debit Common -->
+        <aid-filter android:name="A0000001523010" />  <!-- Discover Contactless -->
+        <aid-filter android:name="A0000000250100" />  <!-- AMEX ExpressPay -->
+        
+        <!-- Research/Test AIDs -->
+        <aid-filter android:name="F0000000000001" />  <!-- Custom Research AID -->
+    </aid-group>
+
+</host-apdu-service>

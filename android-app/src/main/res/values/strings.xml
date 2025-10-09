@@ -1,0 +1,93 @@
+<resources>
+    <string name="app_name">nf-sp00f</string>
+    <string name="app_description">Advanced NFC EMV Card Reader &amp; TTQ Brute Force Tool</string>
+    
+    <!-- Main UI Labels -->
+    <string name="dashboard_title">nf-sp00f Dashboard</string>
+    <string name="read_card_title">Brute Force TTQ Card Reader</string>
+    <string name="emulation_title">EMV Attack Emulation</string>
+    <string name="database_title">Card Database</string>
+    <string name="analysis_title">EMV Analysis Tools</string>
+    
+    <!-- Navigation Labels -->
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_read">Read</string>
+    <string name="nav_emulate">Emulate</string>
+    <string name="nav_database">Database</string>
+    <string name="nav_analysis">Analysis</string>
+    
+    <!-- Bottom Navigation Labels (MISSING - FIXING) -->
+    <string name="bottom_nav_home">Home</string>
+    <string name="bottom_nav_emulation">Emulation</string>
+    <string name="bottom_nav_card_reading">Read</string>
+    <string name="bottom_nav_hardware">Hardware</string>
+    <string name="bottom_nav_logs">Logs</string>
+    
+    <!-- Card Reading Features -->
+    <string name="read_card_button">READ CARD</string>
+    <string name="stop_reading_button">STOP READING</string>
+    <string name="continuous_mode">Continuous Read Mode</string>
+    <string name="stealth_mode">Stealth Mode (No Sounds)</string>
+    <string name="auto_save">Auto-Save Cards</string>
+    <string name="ttq_workflow">TTQ Workflow</string>
+    
+    <!-- Status Messages -->
+    <string name="status_ready">TTQ Brute Force Ready - Select Workflow</string>
+    <string name="status_reading">TTQ Scan Active - Place Card Near Device</string>
+    <string name="status_stopped">TTQ Brute Force Scanner Stopped</string>
+    <string name="status_card_detected">Card Detected! Reading with TTQ Workflow...</string>
+    <string name="status_read_complete">TTQ Read Complete! Auto-saving to database...</string>
+    <string name="status_saved">Card saved to persistent database!</string>
+    
+    <!-- EMV Data Labels -->
+    <string name="pan_label">PAN (Unmasked)</string>
+    <string name="track2_label">Track2 Data</string>
+    <string name="cardholder_label">Cardholder Name</string>
+    <string name="expiry_label">Expiry Date</string>
+    <string name="aip_label">Application Interchange Profile</string>
+    <string name="afl_label">Application File Locator</string>
+    <string name="ttq_label">Terminal Transaction Qualifiers</string>
+    <string name="emv_tags_label">EMV Tags</string>
+    
+    <!-- Workflow Names -->
+    <string name="workflow_standard">Standard Contactless</string>
+    <string name="workflow_offline_forced">Offline Forced</string>
+    <string name="workflow_cvm_required">CVM Required</string>
+    <string name="workflow_issuer_auth">Issuer Authentication</string>
+    <string name="workflow_enhanced_discovery">Enhanced Discovery</string>
+    <string name="workflow_custom_research">Custom Research</string>
+    
+    <!-- Error Messages -->
+    <string name="error_nfc_disabled">NFC is disabled. Please enable NFC in settings.</string>
+    <string name="error_nfc_unavailable">NFC is not available on this device.</string>
+    <string name="error_card_read_failed">Card reading failed. Please try again.</string>
+    <string name="error_ttq_workflow_failed">TTQ Workflow failed. Check card compatibility.</string>
+    
+    <!-- Database Operations -->
+    <string name="database_import">Import Cards</string>
+    <string name="database_export">Export Cards</string>
+    <string name="database_clear">Clear All Cards</string>
+    <string name="database_search">Search Cards</string>
+    
+    <!-- Elite Theme Labels -->
+    <string name="elite_status">🏴‍☠️ nf-sp00f33r</string>
+    <string name="elite_ready">TTQ BRUTE FORCE READY</string>
+    <string name="elite_active">SCANNING WITH TTQ</string>
+    <string name="elite_stealth">STEALTH MODE</string>
+    <string name="elite_continuous">CONTINUOUS MODE</string>
+    
+    <!-- HCE Service -->
+    <string name="hce_service_description">nf-sp00f EMV Card Emulation Service</string>
+    <string name="hce_aid_description">EMV Payment System Environment</string>
+    
+    <!-- Hardware Connection -->
+    <string name="pn532_bluetooth">PN532 Bluetooth (HC-06)</string>
+    <string name="pn532_usb">PN532 USB Direct</string>
+    <string name="hardware_connected">Hardware Connected</string>
+    <string name="hardware_disconnected">Hardware Disconnected</string>
+    
+    <!-- About -->
+    <string name="about_title">About nf-sp00f</string>
+    <string name="about_description">Advanced NFC EMV security research tool with TTQ brute force capabilities</string>
+    <string name="version">Version 1.0.0</string>
+</resources>

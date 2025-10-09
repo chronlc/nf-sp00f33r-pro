@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Don't backup app data to cloud -->
+        <exclude domain="root" />
+        <exclude domain="database" />
+        <exclude domain="external-files" />
+        <exclude domain="external-cache" />
+        <exclude domain="external-media" />
+    </cloud-backup>
+    
+    <device-transfer>
+        <!-- Allow EMV card data transfer between devices -->
+        <include domain="database" path="card_profiles.db" />
+        <include domain="shared_pref" path="app_settings.xml" />
+        <!-- Exclude sensitive debugging data -->
+        <exclude domain="files" path="apdu_logs" />
+        <exclude domain="files" path="debug_data" />
+    </device-transfer>
+</data-extraction-rules>

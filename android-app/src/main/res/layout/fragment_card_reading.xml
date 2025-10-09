@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="@color/background_color">
+
+    <!-- Header -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📡 NFC CARD READING"
+        android:textColor="@color/primary_color"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:layout_marginBottom="16dp" />
+
+    <!-- Control Buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="16dp">
+
+        <Button
+            android:id="@+id/btnStartReading"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="8dp"
+            android:text="🚀 START"
+            android:backgroundTint="@color/success_color"
+            android:textColor="@android:color/white" />
+
+        <Button
+            android:id="@+id/btnStopReading"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="⏹️ STOP"
+            android:backgroundTint="@color/error_color"
+            android:textColor="@android:color/white" />
+
+    </LinearLayout>
+
+    <!-- Status -->
+    <TextView
+        android:id="@+id/textViewStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📱 Ready to Read NFC Cards"
+        android:textColor="@color/primary_text"
+        android:textSize="14sp"
+        android:background="@color/surface_color"
+        android:padding="12dp"
+        android:layout_marginBottom="16dp" />
+
+    <!-- Progress -->
+    <ProgressBar
+        android:id="@+id/progressBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        style="?android:attr/progressBarStyleHorizontal" />
+
+    <!-- Card Info -->
+    <TextView
+        android:id="@+id/textViewCardInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/primary_text"
+        android:textSize="13sp"
+        android:background="@color/surface_color"
+        android:padding="12dp"
+        android:layout_marginBottom="16dp"
+        android:visibility="gone" />
+
+    <!-- Statistics -->
+    <TextView
+        android:id="@+id/textViewStats"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📊 Sessions: 0 | Cards: 0 | APDUs: 0"
+        android:textColor="@color/accent_color"
+        android:textSize="12sp"
+        android:background="@color/surface_color"
+        android:padding="8dp"
+        android:layout_marginBottom="8dp" />
+
+    <!-- APDU Logs -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📡 LIVE APDU LOGS"
+        android:textColor="@color/primary_color"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <!-- Live APDU Text Display -->
+    <TextView
+        android:id="@+id/textViewLiveApdu"
+        android:layout_width="match_parent"
+        android:layout_height="120dp"
+        android:text="🔍 Waiting for NFC card..."
+        android:textColor="@color/command_color"
+        android:textSize="11sp"
+        android:fontFamily="monospace"
+        android:background="@color/surface_color"
+        android:padding="8dp"
+        android:scrollbars="vertical"
+        android:layout_marginBottom="8dp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerViewApduLogs"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/surface_color"
+        android:padding="8dp" />
+
+</LinearLayout>

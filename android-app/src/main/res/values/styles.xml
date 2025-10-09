@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- NF-SP00F33R Professional Theme - Compatible -->
+    <style name="Theme.NfSp00f33r" parent="Theme.AppCompat.DayNight">
+        <!-- Primary Colors -->
+        <item name="colorPrimary">@color/primary_color</item>
+        <item name="colorPrimaryDark">@color/primary_color</item>
+        <item name="colorAccent">@color/secondary_color</item>
+        
+        <!-- Background -->
+        <item name="android:colorBackground">@color/background_color</item>
+        <item name="colorSurface">@color/surface_color</item>
+        
+        <!-- Text Colors -->
+        <item name="android:textColorPrimary">@color/on_surface_color</item>
+        <item name="android:textColorSecondary">@color/on_surface_variant_color</item>
+        
+        <!-- Status Bar -->
+        <item name="android:statusBarColor">@color/primary_color</item>
+        <item name="android:windowLightStatusBar">false</item>
+        
+        <!-- Window Background -->
+        <item name="android:windowBackground">@color/background_color</item>
+    </style>
+
+    <!-- No Action Bar Theme for Splash Screen -->
+    <style name="Theme.NfSp00f33r.NoActionBar" parent="Theme.NfSp00f33r">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+
+    <!-- Professional App Bar Theme -->
+    <style name="Theme.NfSp00f33r.AppBarOverlay" parent="ThemeOverlay.AppCompat.Dark.ActionBar"/>
+    
+    <!-- Professional Popup Theme -->
+    <style name="Theme.NfSp00f33r.PopupOverlay" parent="ThemeOverlay.AppCompat.Light"/>
+    
+    <!-- Professional Button Style -->
+    <style name="NfSp00f33r.Button" parent="Widget.AppCompat.Button">
+        <item name="android:textAllCaps">false</item>
+        <item name="android:background">@color/primary_color</item>
+        <item name="android:textColor">@color/on_primary_color</item>
+    </style>
+</resources>

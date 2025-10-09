@@ -1,0 +1,54 @@
+# Gradle files
+.gradle/
+build/
+android-app/build/
+android-app/.gradle/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+local.properties
+
+# Android specific
+*.apk
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+proguard/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*~
+.DS_Store
+Thumbs.db
+
+# Backup files
+backup_*/
+*_backup_*/
+ui_components_available/
+
+# Migration artifacts
+PROJECT_SCAN.json
+initialize_project.py
+integrate_ui_components.sh
+*.migration
+
+# Screenshots (keep only in docs if needed)
+screen*.png
+
+# IDE specific
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Navigation IDs -->
+    <item name="nav_logs" type="id" />
+    <item name="nav_fuzzer" type="id" />
+    <item name="nav_settings" type="id" />
+    <item name="fragment_container" type="id" />
+    
+    <!-- Card Reading Activity IDs -->
+    <item name="logText" type="id" />
+    <item name="item_apdu_log" type="id" />
+    
+    <!-- Emulation Activity IDs -->
+    <item name="activity_emulation" type="id" />
+    <item name="profileSelectorCard" type="id" />
+    <item name="profileSpinner" type="id" />
+    <item name="loadProfileButton" type="id" />
+    <item name="profileInfoText" type="id" />
+    <item name="deviceSelectorCard" type="id" />
+    <item name="hceButton" type="id" />
+    <item name="pn532Button" type="id" />
+    <item name="controlCard" type="id" />
+    <item name="startButton" type="id" />
+    <item name="stopButton" type="id" />
+    <item name="statsCard" type="id" />
+    <item name="statsText" type="id" />
+    
+    <!-- Home Fragment IDs -->
+    <item name="nfcStatusText" type="id" />
+    <item name="bluetoothStatusText" type="id" />
+    <item name="readCardButton" type="id" />
+    <item name="databaseButton" type="id" />
+    <item name="settingsButton" type="id" />
+    <item name="loadTestDataButton" type="id" />
+    <item name="viewDatabaseButton" type="id" />
+    <item name="clearDatabaseButton" type="id" />
+</resources>

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/nav_home">
+
+    <fragment
+        android:id="@+id/nav_home"
+        android:name="com.mag_sp00f.app.ui.HomeFragment"
+        android:label="@string/bottom_nav_home"
+        tools:layout="@layout/fragment_home" />
+
+    <fragment
+        android:id="@+id/nav_emulation"
+        android:name="com.mag_sp00f.app.ui.EmulationFragment"
+        android:label="@string/bottom_nav_emulation"
+        tools:layout="@layout/fragment_emulation" />
+
+    <fragment
+        android:id="@+id/nav_card_reading"
+        android:name="com.mag_sp00f.app.ui.CardReadingFragment"
+        android:label="@string/bottom_nav_card_reading"
+        tools:layout="@layout/fragment_card_reading" />
+
+    <fragment
+        android:id="@+id/nav_hardware"
+        android:name="com.mag_sp00f.app.ui.HardwareFragment"
+        android:label="@string/bottom_nav_hardware"
+        tools:layout="@layout/fragment_hardware" />
+
+    <fragment
+        android:id="@+id/nav_logs"
+        android:name="com.mag_sp00f.app.ui.LogsFragment"
+        android:label="@string/bottom_nav_logs"
+        tools:layout="@layout/fragment_logs" />
+
+</navigation>
