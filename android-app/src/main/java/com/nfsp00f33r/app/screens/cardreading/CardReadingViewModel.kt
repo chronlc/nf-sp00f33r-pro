@@ -213,9 +213,11 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             // PROXMARK3 EMV WORKFLOW - EXACT MATCH
             
             // Phase 1: SELECT PPSE (2PAY.SYS.DDF01)
-            currentPhase = "PPSE Selection"
-            progress = 0.1f
-            statusMessage = "Selecting PPSE..."
+            withContext(Dispatchers.Main) {
+                currentPhase = "PPSE Selection"
+                progress = 0.1f
+                statusMessage = "Selecting PPSE..."
+            }
             
             val ppseCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E, 
                 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
@@ -232,29 +234,39 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     0L
                 )
                 displayParsedData("PPSE", ppseHex)
-                statusMessage = "PPSE: SW=$realStatusWord"
+                withContext(Dispatchers.Main) {
+                    statusMessage = "PPSE: SW=$realStatusWord"
+                }
                 
                 // LIVE ANALYSIS: Check if PPSE failed, try different approach
                 if (realStatusWord != "9000") {
-                    statusMessage = "PPSE Failed ($realStatusWord) - Trying direct AID selection"
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "PPSE Failed ($realStatusWord) - Trying direct AID selection"
+                    }
                     Timber.w("PPSE selection failed with SW=$realStatusWord, switching strategy")
                 } else {
                     // Parse PPSE response for real AIDs
                     val realAids = extractAidsFromPpseResponse(ppseHex)
                     if (realAids.isNotEmpty()) {
-                        statusMessage = "PPSE Success - Found ${realAids.size} AID(s)"
+                        withContext(Dispatchers.Main) {
+                            statusMessage = "PPSE Success - Found ${realAids.size} AID(s)"
+                        }
                         Timber.i("PPSE returned ${realAids.size} real AIDs: ${realAids.joinToString(", ")}")
                     }
                 }
             } else {
-                statusMessage = "PPSE: No response from card"
+                withContext(Dispatchers.Main) {
+                    statusMessage = "PPSE: No response from card"
+                }
                 Timber.e("PPSE command failed - no response from card")
             }
             
             // Phase 2: Parse PPSE and SELECT first AID found
-            currentPhase = "AID Selection"
-            progress = 0.2f
-            statusMessage = "Selecting AID..."
+            withContext(Dispatchers.Main) {
+                currentPhase = "AID Selection"
+                progress = 0.2f
+                statusMessage = "Selecting AID..."
+            }
             
             // Try multiple common AIDs like Proxmark3 does
             val commonAids = listOf(
@@ -319,9 +331,11 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             }
             
             if (!aidSelected) {
-                statusMessage = "CRITICAL: No valid AID found - Card may not support EMV or be blocked"
-                currentPhase = "Error"
-                progress = 0.0f
+                withContext(Dispatchers.Main) {
+                    statusMessage = "CRITICAL: No valid AID found - Card may not support EMV or be blocked"
+                    currentPhase = "Error"
+                    progress = 0.0f
+                }
                 Timber.e("No AID selection succeeded - aborting EMV workflow")
                 return // Don't continue if no AID selected
             }
@@ -554,12 +568,16 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 }
             }
             
-            statusMessage = "Records complete: $recordsRead read, PAN ${if (panFound) "found" else "not found"}"
+            withContext(Dispatchers.Main) {
+                statusMessage = "Records complete: $recordsRead read, PAN ${if (panFound) "found" else "not found"}"
+            }
             
             // Phase 5: GET DATA for specific EMV tags (PROXMARK3 style)
-            currentPhase = "GET DATA"
-            progress = 0.8f
-            statusMessage = "Getting EMV data..."
+            withContext(Dispatchers.Main) {
+                currentPhase = "GET DATA"
+                progress = 0.8f
+                statusMessage = "Getting EMV data..."
+            }
             
             val emvTags = listOf(
                 "9F13", // Last Online ATC
@@ -593,13 +611,17 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             }
             
             // Phase 6: Final Processing
-            currentPhase = "Complete"
-            progress = 1.0f
-            statusMessage = "EMV scan complete - PROXMARK3 workflow"
+            withContext(Dispatchers.Main) {
+                currentPhase = "Complete"
+                progress = 1.0f
+                statusMessage = "EMV scan complete - PROXMARK3 workflow"
+            }
             
         } catch (e: Exception) {
             Timber.e(e, "EMV communication error")
-            statusMessage = "EMV Error: ${e.message}"
+            withContext(Dispatchers.Main) {
+                statusMessage = "EMV Error: ${e.message}"
+            }
         } finally {
             if (isoDep != null) {
                 isoDep.close()
@@ -625,18 +647,22 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         scannedCards = scannedCards + virtualCard
         
         // Complete
-        currentPhase = "Scan Complete"
-        progress = 1.0f
-        statusMessage = "EMV scan complete - ${apduLog.size} APDUs, Full data extracted"
-        scanState = ScanState.SCAN_COMPLETE
+        withContext(Dispatchers.Main) {
+            currentPhase = "Scan Complete"
+            progress = 1.0f
+            statusMessage = "EMV scan complete - ${apduLog.size} APDUs, Full data extracted"
+            scanState = ScanState.SCAN_COMPLETE
+        }
         
         Timber.i("Proxmark3 EMV workflow complete: PAN=${extractedData.pan}, APDUs=${apduLog.size}")
         
         // Auto-save to database
         delay(1000)
         saveCardProfile(extractedData)
-        statusMessage = "Card saved to database - Ready for next scan"
-        scanState = ScanState.IDLE
+        withContext(Dispatchers.Main) {
+            statusMessage = "Card saved to database - Ready for next scan"
+            scanState = ScanState.IDLE
+        }
     }
     
     /**
