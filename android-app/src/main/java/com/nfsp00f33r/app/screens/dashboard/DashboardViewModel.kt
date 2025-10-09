@@ -122,8 +122,12 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                 // Set up periodic polling for hardware status updates
                 setupHardwareStatusPolling()
                 
-                // Load initial card data
+                // Load initial card data with explicit logging
+                Timber.d("Loading initial card data from encrypted storage...")
                 refreshCardData()
+                
+                // Start periodic refresh for real-time updates
+                startPeriodicRefresh()
                 
                 isInitialized = true
                 Timber.i("DashboardViewModel initialized with LIVE data polling")
@@ -171,7 +175,9 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                 
                 // Phase 2B Day 1: Use PN532DeviceModule (with safety check)
                 val realPn532Connected = try {
-                    pn532Module.isConnected()
+                    val connected = pn532Module.isConnected()
+                    Timber.d("PN532 connection state: $connected")
+                    connected
                 } catch (e: Exception) {
                     Timber.w("PN532 module not ready: ${e.message}")
                     false
@@ -229,6 +235,23 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
+     * Start periodic refresh for live updates
+     */
+    private fun startPeriodicRefresh() {
+        viewModelScope.launch {
+            while (true) {
+                delay(3000L) // Refresh every 3 seconds
+                try {
+                    setupHardwareStatusPolling() // Update PN532 status
+                    refreshCardData() // Update card statistics
+                } catch (e: Exception) {
+                    Timber.w("Periodic refresh failed: ${e.message}")
+                }
+            }
+        }
+    }
+    
+    /**
      * Refresh card data from CardDataStore (encrypted storage)
      */
     private fun refreshCardData() {
@@ -236,6 +259,7 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
             try {
                 // Load from encrypted storage
                 val storageProfiles = cardDataStore.getAllProfiles()
+                Timber.d("Loaded ${storageProfiles.size} profiles from encrypted storage")
                 val allProfiles = storageProfiles.map { CardProfileAdapter.toAppProfile(it) }
                 
                 // Convert ONLY profiles with REAL data to VirtualCard format
@@ -259,8 +283,12 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                     )
                 }.reversed() // Show most recent first
                 
-                // Calculate real statistics
-                cardStatistics = calculateCardStatistics(allProfiles)
+                // Calculate real statistics and update UI on Main thread
+                val newStats = calculateCardStatistics(allProfiles)
+                
+                withContext(Dispatchers.Main) {
+                    cardStatistics = newStats
+                }
                 
                 Timber.d("Card data refreshed: ${recentCards.size} recent cards, ${cardStatistics.totalCards} total")
                 

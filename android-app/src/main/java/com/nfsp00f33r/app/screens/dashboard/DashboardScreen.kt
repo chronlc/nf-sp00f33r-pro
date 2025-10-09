@@ -413,10 +413,10 @@ private fun HardwareComponentRow(
             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
             color = when {
                 status.contains("Connected", ignoreCase = true) || status.contains("Active", ignoreCase = true) -> Color(0xFF4CAF50)
-                status.contains("Ready", ignoreCase = true) || status.contains("Available", ignoreCase = true) -> Color(0xFF2196F3)
+                status.contains("Ready", ignoreCase = true) || status.contains("Available", ignoreCase = true) -> Color(0xFF4CAF50)
                 status.contains("Detected", ignoreCase = true) || status.contains("Found", ignoreCase = true) -> Color(0xFF4CAF50)
                 status.contains("Searching", ignoreCase = true) || status.contains("Connecting", ignoreCase = true) -> Color(0xFFFFC107)
-                status.contains("Error", ignoreCase = true) || status.contains("Failed", ignoreCase = true) -> Color(0xFFF44336)
+                status.contains("Error", ignoreCase = true) || status.contains("Failed", ignoreCase = true) || status.contains("Disconnected", ignoreCase = true) -> Color(0xFFF44336)
                 else -> Color(0xFF888888)
             },
             textAlign = TextAlign.End
