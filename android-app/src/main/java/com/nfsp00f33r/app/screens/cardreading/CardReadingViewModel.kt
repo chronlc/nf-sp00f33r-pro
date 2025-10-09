@@ -169,10 +169,12 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         viewModelScope.launch {
             try {
                 val cardId = tag.id.joinToString(":") { "%02X".format(it) }
-                statusMessage = "EMV Card Detected: $cardId"
-                scanState = ScanState.CARD_DETECTED
-                currentPhase = "Starting EMV Workflow"
-                progress = 0.1f
+                withContext(Dispatchers.Main) {
+                    statusMessage = "EMV Card Detected: $cardId"
+                    scanState = ScanState.CARD_DETECTED
+                    currentPhase = "Starting EMV Workflow"
+                    progress = 0.1f
+                }
                 
                 // Clear previous data for new scan
                 apduLog = emptyList()
@@ -185,9 +187,11 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 
             } catch (e: Exception) {
                 Timber.e(e, "Error processing NFC tag")
-                statusMessage = "Error processing card: ${e.message}"
-                scanState = ScanState.ERROR
-                currentPhase = "Error"
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Error processing card: ${e.message}"
+                    scanState = ScanState.ERROR
+                    currentPhase = "Error"
+                }
             }
         }
     }
