@@ -204,30 +204,25 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                 val realPn532Connected = try {
                     withContext(Dispatchers.IO) {
                         kotlinx.coroutines.withTimeoutOrNull(1000) {
-                            // Check if module is initialized and has active connection
+                            // Check if module is initialized and has active hardware adapter
                             val connected = try {
-                                pn532Module.isConnected()
+                                val isConn = pn532Module.isConnected()
+                                val connState = try { pn532Module.getConnectionState().value } catch (e: Exception) { null }
+                                val connType = try { pn532Module.getConnectionType().value } catch (e: Exception) { null }
+                                
+                                Timber.d("📡 PN532 Check: isConnected=$isConn, state=$connState, type=$connType")
+                                
+                                // Return true only if actually connected
+                                isConn
                             } catch (e: Exception) {
-                                Timber.w("PN532Module not initialized: ${e.message}")
+                                Timber.w("⚠️  PN532Module check error: ${e.message}")
                                 false
                             }
-                            
-                            // Also check connection state via LiveData
-                            val connectionState = try {
-                                pn532Module.getConnectionState().value
-                            } catch (e: Exception) {
-                                null
-                            }
-                            
-                            val isActuallyConnected = connected && 
-                                (connectionState == com.nfsp00f33r.app.hardware.PN532Manager.ConnectionState.CONNECTED)
-                            
-                            Timber.d("PN532 status: isConnected=$connected, state=$connectionState, actual=$isActuallyConnected")
-                            isActuallyConnected
+                            connected
                         } ?: false // Timeout = not connected
                     }
                 } catch (e: Exception) {
-                    Timber.w("PN532 module check failed: ${e.message}")
+                    Timber.w("❌ PN532 module check failed: ${e.message}")
                     false
                 }
                 
