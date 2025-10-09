@@ -415,4 +415,434 @@ object EmvTlvParser {
     fun clearRocaAnalysisResults() {
         rocaAnalysisResults.clear()
     }
+    
+    // ==================== ADVANCED PROXMARK3-INSPIRED PARSING ====================
+    // Based on RFIDResearchGroup/proxmark3 emv_tags.c implementation
+    
+    /**
+     * Parse DOL (Data Object List) - PDOL, CDOL1, CDOL2, DDOL
+     * Returns list of (tag, length) pairs
+     */
+    data class DolEntry(
+        val tag: String,
+        val length: Int,
+        val tagName: String
+    )
+    
+    fun parseDol(dolData: String): List<DolEntry> {
+        val entries = mutableListOf<DolEntry>()
+        
+        try {
+            val bytes = hexToBytes(dolData)
+            var offset = 0
+            
+            while (offset < bytes.size) {
+                // Parse tag
+                val tagResult = parseTagAtOffset(bytes, offset, bytes.size)
+                if (tagResult == null) break
+                
+                val (tagBytes, tagSize) = tagResult
+                val tagHex = bytesToHex(tagBytes).uppercase()
+                offset += tagSize
+                
+                if (offset >= bytes.size) break
+                
+                // Parse length (single byte in DOL)
+                val length = bytes[offset].toInt() and 0xFF
+                offset++
+                
+                val tagName = EmvTagDictionary.getTagDescription(tagHex)
+                entries.add(DolEntry(tagHex, length, tagName))
+                
+                Timber.d("$TAG DOL Entry: $tagHex ($tagName) - Length: $length bytes")
+            }
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG DOL parsing error: ${e.message}", e)
+        }
+        
+        return entries
+    }
+    
+    /**
+     * Parse AFL (Application File Locator) - Tag 94
+     * Returns list of (SFI, startRecord, endRecord, offlineRecords)
+     */
+    data class AflEntry(
+        val sfi: Int,
+        val startRecord: Int,
+        val endRecord: Int,
+        val offlineRecords: Int
+    )
+    
+    fun parseAfl(aflData: String): List<AflEntry> {
+        val entries = mutableListOf<AflEntry>()
+        
+        try {
+            val bytes = hexToBytes(aflData)
+            
+            if (bytes.size % 4 != 0) {
+                Timber.w("$TAG AFL data length invalid: ${bytes.size} bytes (must be multiple of 4)")
+                return entries
+            }
+            
+            for (i in bytes.indices step 4) {
+                val sfi = (bytes[i].toInt() and 0xFF) shr 3
+                val startRecord = bytes[i + 1].toInt() and 0xFF
+                val endRecord = bytes[i + 2].toInt() and 0xFF
+                val offlineRecords = bytes[i + 3].toInt() and 0xFF
+                
+                entries.add(AflEntry(sfi, startRecord, endRecord, offlineRecords))
+                Timber.d("$TAG AFL Entry: SFI=$sfi, Records=$startRecord-$endRecord, Offline=$offlineRecords")
+            }
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG AFL parsing error: ${e.message}", e)
+        }
+        
+        return entries
+    }
+    
+    /**
+     * Parse AIP (Application Interchange Profile) - Tag 82
+     * Returns structured capability information
+     */
+    data class AipCapabilities(
+        val sdaSupported: Boolean,
+        val ddaSupported: Boolean,
+        val cdaSupported: Boolean,
+        val cardholderVerificationSupported: Boolean,
+        val terminalRiskManagement: Boolean,
+        val issuerAuthenticationSupported: Boolean,
+        val msdSupported: Boolean,
+        val rawBytes: String
+    )
+    
+    fun parseAip(aipData: String): AipCapabilities? {
+        try {
+            val bytes = hexToBytes(aipData)
+            if (bytes.size < 2) {
+                Timber.w("$TAG AIP data too short: ${bytes.size} bytes")
+                return null
+            }
+            
+            val byte1 = bytes[0].toInt() and 0xFF
+            val byte2 = bytes[1].toInt() and 0xFF
+            
+            val capabilities = AipCapabilities(
+                sdaSupported = (byte1 and 0x40) != 0,
+                ddaSupported = (byte1 and 0x20) != 0,
+                cdaSupported = (byte1 and 0x01) != 0,
+                cardholderVerificationSupported = (byte1 and 0x10) != 0,
+                terminalRiskManagement = (byte1 and 0x08) != 0,
+                issuerAuthenticationSupported = (byte1 and 0x04) != 0,
+                msdSupported = (byte2 and 0x80) != 0,
+                rawBytes = aipData
+            )
+            
+            Timber.d("$TAG AIP Analysis:")
+            Timber.d("$TAG   SDA Supported: ${capabilities.sdaSupported}")
+            Timber.d("$TAG   DDA Supported: ${capabilities.ddaSupported}")
+            Timber.d("$TAG   CDA Supported: ${capabilities.cdaSupported}")
+            Timber.d("$TAG   CVM Supported: ${capabilities.cardholderVerificationSupported}")
+            Timber.d("$TAG   MSD Supported: ${capabilities.msdSupported}")
+            
+            return capabilities
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG AIP parsing error: ${e.message}", e)
+            return null
+        }
+    }
+    
+    /**
+     * Parse CID (Cryptogram Information Data) - Tag 9F27
+     * Returns AC type and advice/referral information
+     */
+    data class CidInfo(
+        val acType: String,
+        val adviceRequired: Boolean,
+        val reasonCode: String,
+        val rawByte: String
+    )
+    
+    fun parseCid(cidData: String): CidInfo? {
+        try {
+            val bytes = hexToBytes(cidData)
+            if (bytes.isEmpty()) return null
+            
+            val cidByte = bytes[0].toInt() and 0xFF
+            
+            val acType = when (cidByte and 0xC0) {
+                0x00 -> "AAC (Transaction declined)"
+                0x40 -> "TC (Transaction approved)"
+                0x80 -> "ARQC (Online authorisation requested)"
+                0xC0 -> "RFU"
+                else -> "Unknown"
+            }
+            
+            val adviceRequired = (cidByte and 0x08) != 0
+            
+            val reasonCode = when (cidByte and 0x07) {
+                0 -> "No information given"
+                1 -> "Service not allowed"
+                2 -> "PIN Try Limit exceeded"
+                3 -> "Issuer authentication failed"
+                else -> "RFU (${cidByte and 0x07})"
+            }
+            
+            Timber.d("$TAG CID Analysis: $acType, Advice=$adviceRequired, Reason=$reasonCode")
+            
+            return CidInfo(acType, adviceRequired, reasonCode, cidData)
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG CID parsing error: ${e.message}", e)
+            return null
+        }
+    }
+    
+    /**
+     * Parse CVM_LIST (Cardholder Verification Method List) - Tag 8E
+     * Returns X/Y values and CVM rules
+     */
+    data class CvmRule(
+        val method: String,
+        val condition: String,
+        val failOnUnsuccessful: Boolean,
+        val rawBytes: String
+    )
+    
+    data class CvmList(
+        val amountX: Long,
+        val amountY: Long,
+        val rules: List<CvmRule>
+    )
+    
+    fun parseCvmList(cvmData: String): CvmList? {
+        try {
+            val bytes = hexToBytes(cvmData)
+            
+            if (bytes.size < 10 || bytes.size % 2 != 0) {
+                Timber.w("$TAG CVM_LIST invalid length: ${bytes.size} bytes")
+                return null
+            }
+            
+            // Parse X and Y amounts (4 bytes each, BCD)
+            val amountX = ((bytes[0].toInt() and 0xFF) shl 24) or
+                         ((bytes[1].toInt() and 0xFF) shl 16) or
+                         ((bytes[2].toInt() and 0xFF) shl 8) or
+                         (bytes[3].toInt() and 0xFF)
+            
+            val amountY = ((bytes[4].toInt() and 0xFF) shl 24) or
+                         ((bytes[5].toInt() and 0xFF) shl 16) or
+                         ((bytes[6].toInt() and 0xFF) shl 8) or
+                         (bytes[7].toInt() and 0xFF)
+            
+            val rules = mutableListOf<CvmRule>()
+            
+            // Parse CVM rules (2 bytes each)
+            for (i in 8 until bytes.size step 2) {
+                val methodByte = bytes[i].toInt() and 0xFF
+                val conditionByte = bytes[i + 1].toInt() and 0xFF
+                
+                val method = when (methodByte and 0x3F) {
+                    0x00 -> "Fail CVM processing"
+                    0x01 -> "Plaintext PIN verification by ICC"
+                    0x02 -> "Enciphered PIN verified online"
+                    0x03 -> "Plaintext PIN by ICC and signature"
+                    0x04 -> "Enciphered PIN verification by ICC"
+                    0x05 -> "Enciphered PIN by ICC and signature"
+                    0x1E -> "Signature (paper)"
+                    0x1F -> "No CVM required"
+                    0x3F -> "NOT AVAILABLE"
+                    else -> "Unknown method (${methodByte and 0x3F})"
+                }
+                
+                val condition = when (conditionByte) {
+                    0x00 -> "Always"
+                    0x01 -> "If unattended cash"
+                    0x02 -> "If not unattended cash and not manual cash and not purchase with cashback"
+                    0x03 -> "If terminal supports the CVM"
+                    0x04 -> "If manual cash"
+                    0x05 -> "If purchase with cashback"
+                    0x06 -> "If transaction in application currency and under X"
+                    0x07 -> "If transaction in application currency and over X"
+                    0x08 -> "If transaction in application currency and under Y"
+                    0x09 -> "If transaction in application currency and over Y"
+                    else -> "Unknown condition ($conditionByte)"
+                }
+                
+                val failOnUnsuccessful = (methodByte and 0x40) == 0
+                
+                rules.add(CvmRule(method, condition, failOnUnsuccessful, 
+                    bytesToHex(byteArrayOf(bytes[i], bytes[i + 1]))))
+                
+                Timber.d("$TAG CVM Rule: $method - $condition [${if (failOnUnsuccessful) "FAIL" else "CONTINUE"} if unsuccessful]")
+            }
+            
+            return CvmList(amountX.toLong(), amountY.toLong(), rules)
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG CVM_LIST parsing error: ${e.message}", e)
+            return null
+        }
+    }
+    
+    /**
+     * Parse bitmask tags (AIP, TVR, AUC, CTQ, TTQ, CVR)
+     * Returns human-readable interpretation
+     */
+    fun parseBitmask(tagId: String, bitmaskData: String): List<String> {
+        val interpretations = mutableListOf<String>()
+        
+        try {
+            val bytes = hexToBytes(bitmaskData)
+            
+            when (tagId.uppercase()) {
+                "82" -> { // AIP
+                    if (bytes.size >= 2) {
+                        val byte1 = bytes[0].toInt() and 0xFF
+                        val byte2 = bytes[1].toInt() and 0xFF
+                        
+                        if (byte1 and 0x40 != 0) interpretations.add("SDA supported")
+                        if (byte1 and 0x20 != 0) interpretations.add("DDA supported")
+                        if (byte1 and 0x10 != 0) interpretations.add("Cardholder verification supported")
+                        if (byte1 and 0x08 != 0) interpretations.add("Terminal risk management required")
+                        if (byte1 and 0x04 != 0) interpretations.add("Issuer authentication supported")
+                        if (byte1 and 0x01 != 0) interpretations.add("CDA supported")
+                        if (byte2 and 0x80 != 0) interpretations.add("MSD supported")
+                    }
+                }
+                
+                "9F07" -> { // AUC - Application Usage Control
+                    if (bytes.size >= 2) {
+                        val byte1 = bytes[0].toInt() and 0xFF
+                        val byte2 = bytes[1].toInt() and 0xFF
+                        
+                        if (byte1 and 0x80 != 0) interpretations.add("Valid for domestic cash")
+                        if (byte1 and 0x40 != 0) interpretations.add("Valid for international cash")
+                        if (byte1 and 0x20 != 0) interpretations.add("Valid for domestic goods")
+                        if (byte1 and 0x10 != 0) interpretations.add("Valid for international goods")
+                        if (byte1 and 0x08 != 0) interpretations.add("Valid for domestic services")
+                        if (byte1 and 0x04 != 0) interpretations.add("Valid for international services")
+                        if (byte1 and 0x02 != 0) interpretations.add("Valid for ATMs")
+                        if (byte1 and 0x01 != 0) interpretations.add("Valid at terminals other than ATMs")
+                        if (byte2 and 0x80 != 0) interpretations.add("Domestic cashback allowed")
+                        if (byte2 and 0x40 != 0) interpretations.add("International cashback allowed")
+                    }
+                }
+                
+                "9F6C" -> { // CTQ - Card Transaction Qualifiers
+                    if (bytes.size >= 2) {
+                        val byte1 = bytes[0].toInt() and 0xFF
+                        val byte2 = bytes[1].toInt() and 0xFF
+                        
+                        if (byte1 and 0x80 != 0) interpretations.add("Online PIN required")
+                        if (byte1 and 0x40 != 0) interpretations.add("Signature required")
+                        if (byte1 and 0x20 != 0) interpretations.add("Go online if ODA fails and reader online capable")
+                        if (byte1 and 0x10 != 0) interpretations.add("Switch interface if ODA fails and reader supports VIS")
+                        if (byte1 and 0x08 != 0) interpretations.add("Go online if application expired")
+                        if (byte1 and 0x04 != 0) interpretations.add("Switch interface for cash transactions")
+                        if (byte1 and 0x02 != 0) interpretations.add("Switch interface for cashback transactions")
+                        if (byte2 and 0x80 != 0) interpretations.add("Consumer Device CVM performed")
+                        if (byte2 and 0x40 != 0) interpretations.add("Card supports issuer update processing at POS")
+                    }
+                }
+                
+                "9F66" -> { // TTQ - Terminal Transaction Qualifiers
+                    if (bytes.size >= 3) {
+                        val byte1 = bytes[0].toInt() and 0xFF
+                        val byte2 = bytes[1].toInt() and 0xFF
+                        val byte3 = bytes[2].toInt() and 0xFF
+                        
+                        if (byte1 and 0x80 != 0) interpretations.add("MSD supported")
+                        if (byte1 and 0x40 != 0) interpretations.add("VSDC supported")
+                        if (byte1 and 0x20 != 0) interpretations.add("qVSDC supported")
+                        if (byte1 and 0x10 != 0) interpretations.add("EMV contact chip supported")
+                        if (byte1 and 0x08 != 0) interpretations.add("Offline-only reader")
+                        if (byte1 and 0x04 != 0) interpretations.add("Online PIN supported")
+                        if (byte1 and 0x02 != 0) interpretations.add("Signature supported")
+                        if (byte2 and 0x80 != 0) interpretations.add("Online cryptogram required")
+                        if (byte2 and 0x40 != 0) interpretations.add("CVM required")
+                        if (byte2 and 0x20 != 0) interpretations.add("Contact Chip Offline PIN supported")
+                        if (byte3 and 0x80 != 0) interpretations.add("Issuer Update Processing supported")
+                        if (byte3 and 0x40 != 0) interpretations.add("Mobile functionality supported")
+                    }
+                }
+            }
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG Bitmask parsing error for $tagId: ${e.message}", e)
+        }
+        
+        return interpretations
+    }
+    
+    /**
+     * Convert hex string to byte array
+     */
+    private fun hexToBytes(hex: String): ByteArray {
+        val cleanHex = hex.replace(" ", "").replace(":", "")
+        return ByteArray(cleanHex.length / 2) { i ->
+            cleanHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+    
+    /**
+     * Parse date in YYMMDD format - Tag 5F24, 5F25, 9A
+     */
+    fun parseYymmdd(dateData: String): String? {
+        try {
+            val bytes = hexToBytes(dateData)
+            if (bytes.size != 3) return null
+            
+            val yy = String.format("%02d", bytes[0].toInt() and 0xFF)
+            val mm = String.format("%02d", bytes[1].toInt() and 0xFF)
+            val dd = String.format("%02d", bytes[2].toInt() and 0xFF)
+            
+            return "20$yy-$mm-$dd"
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG Date parsing error: ${e.message}", e)
+            return null
+        }
+    }
+    
+    /**
+     * Parse numeric BCD data - Tags like 5F28, 5F2A, 9F02, 9F03
+     */
+    fun parseNumeric(numericData: String): Long? {
+        try {
+            val bytes = hexToBytes(numericData)
+            var result = 0L
+            
+            for (byte in bytes) {
+                val highNibble = (byte.toInt() and 0xF0) shr 4
+                val lowNibble = byte.toInt() and 0x0F
+                
+                result = result * 10 + highNibble
+                result = result * 10 + lowNibble
+            }
+            
+            return result
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG Numeric parsing error: ${e.message}", e)
+            return null
+        }
+    }
+    
+    /**
+     * Get human-readable string from ASCII hex data - Tags like 50, 5F20, 5F2D
+     */
+    fun parseString(stringData: String): String? {
+        try {
+            val bytes = hexToBytes(stringData)
+            return bytes.toString(Charsets.US_ASCII).trim()
+            
+        } catch (e: Exception) {
+            Timber.e("$TAG String parsing error: ${e.message}", e)
+            return null
+        }
+    }
 }

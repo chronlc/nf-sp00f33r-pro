@@ -243,3 +243,38 @@ Located in android-app/src/main/kotlin/com/nfsp00f33r/app/screens/settings/:
 - ViewModels for state management (MVVM pattern)
 - All screens access modules via NfSp00fApplication singleton accessors
 - **2025-10-09 09:56:** After completing any task where build is validated as successful, ALWAYS commit changes to git with a descriptive commit message. This ensures progress is saved and provides rollback points if needed.
+- **2025-10-09 10:02:** Session completed October 9, 2025 04:50 AM: Successfully reverted CardReadingViewModel to pre-merge backup after dynamic EMV enhancements broke data parsing. Added ROCA vulnerability fields (rocaVulnerabilityStatus, isRocaVulnerable) to restore compatibility. Build successful, app installed and working. Created nf-sp00f33r-pro git repository with comprehensive .gitignore. Next task: Re-implement dynamic EMV flow enhancements with proper threading safety using withContext(Dispatchers.Main) for UI state updates.
+- **2025-10-09 10:08:** nf-sp00f33r project state as of October 9, 2025:
+- Project location: /home/user/DEVCoDE/FINALS/nf-sp00f33r
+- Package: com.nfsp00f33r.app
+- Branch: main (was feature/framework-adoption, now merged)
+- Build status: BUILD SUCCESSFUL, APK installed and working
+- Recent commits: 4 commits including ROCA field restoration, .gitignore setup, initial commit
+- Git status: memory.instructions.md has uncommitted changes
+- Module system: 6 modules registered (Logging, SecureMasterPassword, CardDataStore, PN532Device, NfcHce, Emulation)
+- All modules in RUNNING state
+- Tech stack: Kotlin 1.9.20, Compose Material3, BouncyCastle 1.70, Min SDK 28
+- Last successful operation: APK build, install, and launch via SplashActivity
+- Current task: Session reloaded, ready for next work
+- **2025-10-09 10:12:** Dynamic EMV Flow Rebuild Plan (October 9, 2025):
+
+**What Broke:** Dynamic EMV enhancements broke CardReadingViewModel data parsing due to threading issues when updating UI state from background coroutines.
+
+**Root Cause:** UI state updates (mutableStateOf) called from background thread without withContext(Dispatchers.Main)
+
+**What Needs Rebuilding:**
+1. PDOL Data Generation - Random unpredictable number (SecureRandom), current date/time, proper BER-TLV length encoding
+2. AIP-Based Flow Strategy - Detects SDA/DDA/CDA support, adjusts authentication strategy
+3. AFL-Driven Record Reading - Parses AFL from GPO response, reads exact SFI/record combinations
+4. Template-Aware Recursive Parsing - Handles nested TLV structures in tags 6F, A5, 70, 77, 80
+5. CDOL Support - Extracts CDOL1/CDOL2, builds CDOL data for GENERATE AC
+
+**Threading Fix Required:**
+- All UI state updates MUST use: withContext(Dispatchers.Main) { scanState = X; statusMessage = Y }
+- Background EMV processing stays on Dispatchers.IO
+- APDU log updates wrapped in Main dispatcher
+- Progress updates wrapped in Main dispatcher
+
+**Current State:** Reverted to working pre-merge backup with ROCA fields added, BUILD SUCCESSFUL
+**Backup Location:** /home/user/DEVCoDE/FINALS/nf-sp00f33r/backups/pre-merge-20251009_023549/
+**Next Step:** Re-implement enhancements with proper threading following Universal Laws
