@@ -50,24 +50,28 @@ class PN532DeviceModule(
     /**
      * Initialize the PN532 device module
      */
-    override suspend fun onInitialize() = withContext(Dispatchers.IO) {
+    override suspend fun onInitialize() {
         getLogger().info("Initializing PN532Device module...")
         
-        // Create manager instance
-        manager = PN532Manager(context)
-        
-        // Set up state observation
-        manager.connectionState.observeForever { state ->
-            lastConnectionState = state
-            getLogger().debug("PN532 connection state changed: $state")
+        // Create manager instance (on main thread for LiveData)
+        manager = withContext(Dispatchers.Main) {
+            val mgr = PN532Manager(context)
+            
+            // Set up state observation (must be on main thread)
+            mgr.connectionState.observeForever { state ->
+                lastConnectionState = state
+                getLogger().debug("PN532 connection state changed: $state")
+            }
+            
+            mgr.connectionType.observeForever { type ->
+                lastConnectionType = type
+                getLogger().debug("PN532 connection type changed: $type")
+            }
+            
+            mgr
         }
         
-        manager.connectionType.observeForever { type ->
-            lastConnectionType = type
-            getLogger().debug("PN532 connection type changed: $type")
-        }
-        
-        // Reset statistics
+        // Reset statistics (can be done on any thread)
         connectionAttempts = 0
         successfulConnections = 0
         failedConnections = 0

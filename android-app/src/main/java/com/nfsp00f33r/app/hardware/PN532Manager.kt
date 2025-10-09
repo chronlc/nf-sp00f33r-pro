@@ -41,8 +41,8 @@ class PN532Manager(private val context: Context) {
     private var connectionCallback: ((String) -> Unit)? = null
 
     init {
-        _connectionState.value = ConnectionState.DISCONNECTED
-        _connectionType.value = ConnectionType.USB_SERIAL
+        _connectionState.postValue(ConnectionState.DISCONNECTED)
+        _connectionType.postValue(ConnectionType.USB_SERIAL)
     }
 
     /**
