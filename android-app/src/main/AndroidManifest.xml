@@ -149,6 +149,16 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Debug Command Receiver - AI Agent Interface (Debug builds only) -->
+        <receiver
+            android:name=".debug.DebugCommandReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="com.nfsp00f33r.app.DEBUG_COMMAND" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>
