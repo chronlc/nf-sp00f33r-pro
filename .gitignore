@@ -1,10 +1,24 @@
 # nf-sp00f33r-pro .gitignore
+# Repository scope: /android-app/ only
 
-# Project-specific exclusions
+# Root-level exclusions (non-android-app directories)
 /backups/
 /.vscode/
 /scripts/
 /.venv/
+/.github/
+/gradle/
+/.gradle/
+build.gradle
+settings.gradle
+gradle.properties
+gradlew
+gradlew.bat
+requirements.txt
+*.sh
+threading_fixes.txt
+setup_pn532_testing.sh
+test_dashboard_cardreading.sh
 *.zip
 
 # Android Build Files
