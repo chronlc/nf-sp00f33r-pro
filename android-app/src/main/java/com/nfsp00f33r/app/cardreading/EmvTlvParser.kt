@@ -26,9 +26,34 @@ object EmvTlvParser {
     private val rocaAnalysisResults = mutableMapOf<String, RocaVulnerabilityAnalyzer.RocaAnalysisResult>()
     
     // Template tags that contain nested TLV structures
+    // Based on ChAP.py: tags marked as TEMPLATE contain nested TLV data
     private val TEMPLATE_TAGS = setOf(
-        "6F", "A5", "70", "77", "80", "61", "73", "71", "72", "83",
-        "BF0C", "E1", "E2", "E3", "E4", "E5"
+        "6F",   // FCI Template - BINARY TEMPLATE
+        "70",   // Record Template - BINARY TEMPLATE  
+        "77",   // Response Message Template Format 2 - BINARY TEMPLATE
+        "A5",   // FCI Proprietary Template - BINARY TEMPLATE
+        "61",   // Application Template - implied TEMPLATE
+        "73",   // Directory Discretionary Template - implied TEMPLATE
+        "BF0C", // FCI Issuer Discretionary Data - BER_TLV TEMPLATE
+        "8C",   // CDOL1 - BINARY TEMPLATE (contains DOL entries)
+        "8D",   // CDOL2 - BINARY TEMPLATE (contains DOL entries)
+        "9F38"  // PDOL - BINARY TEMPLATE (contains DOL entries)
+    )
+    
+    // Tags that are ALWAYS primitive (never templates) despite having constructed bit set
+    // These are EMV spec quirks where the tag encoding doesn't match the data structure
+    // Based on ChAP.py reference: tags marked as ITEM are primitive, TEMPLATE are constructed
+    private val ALWAYS_PRIMITIVE_TAGS = setOf(
+        "84",  // DF Name - MIXED ITEM - Contains AID/DF Name directly, NOT nested tags
+        "86",  // Issuer Script Command - BER_TLV ITEM but NOT recursive template
+        "87",  // Application Priority Indicator - BER_TLV ITEM
+        "93",  // Signed Static Application Data - BINARY ITEM - Raw signature data
+        "94",  // Application File Locator - BINARY ITEM - AFL records, not TLV
+        "97",  // Transaction Certificate Data Object List (TDOL) - BER_TLV ITEM
+        "5F50", // Issuer URL - TEXT ITEM
+        "9F0B", // Cardholder Name Extended - TEXT ITEM
+        "9F4B", // Signed Dynamic Application Data - BINARY ITEM - Raw signature bytes
+        "9F4A"  // Static Data Authentication Tag List - BINARY ITEM
     )
     
     // Constructed tags (bit 6 of first tag byte = 1)
@@ -317,8 +342,14 @@ object EmvTlvParser {
     
     /**
      * Determine if a tag is a template (contains nested TLV structures)
+     * CRITICAL: Some tags have constructed bit set but are actually primitive (EMV spec quirks)
      */
     private fun isTemplateTag(tagHex: String, firstTagByte: Byte): Boolean {
+        // ALWAYS check primitive list first - these override constructed bit
+        if (ALWAYS_PRIMITIVE_TAGS.contains(tagHex)) {
+            return false
+        }
+        
         return TEMPLATE_TAGS.contains(tagHex) || 
                isConstructedTag(firstTagByte) ||
                EmvTagDictionary.getTagCategory(tagHex) == "Core EMV"
