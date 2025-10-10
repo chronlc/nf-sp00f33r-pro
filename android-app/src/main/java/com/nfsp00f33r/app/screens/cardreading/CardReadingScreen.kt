@@ -951,7 +951,7 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                     }
                 }
                 
-                // Show remaining fields
+                // Show remaining fields grouped by TAG with context
                 val remainingFields = viewModel.parsedEmvFields.filter { (key, _) ->
                     key !in (cardData.keys + appData.keys + cryptoData.keys) && !key.startsWith("raw_")
                 }
