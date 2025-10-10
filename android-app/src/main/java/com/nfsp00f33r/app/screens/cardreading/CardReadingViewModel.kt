@@ -904,6 +904,23 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                         }
                     }
                 }
+                "95" -> {
+                    // Terminal Verification Results (TVR) - 5 bytes, all zeros indicates no errors
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F66" -> {
+                    // Terminal Transaction Qualifiers (TTQ) - 4 bytes
+                    // Typical contactless MSD/qVSDC support
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0x36.toByte() // MSD supported, qVSDC supported, online PIN supported
+                            1 -> 0x00
+                            2 -> 0xC0.toByte() // CVM required
+                            3 -> 0x00
+                            else -> 0x00
+                        }
+                    }
+                }
                 else -> {
                     // Unknown tag - fill with zeros
                     Timber.w("PDOL: Unknown tag ${entry.tag} - filling with zeros")
