@@ -203,6 +203,9 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private suspend fun executeProxmark3EmvWorkflow(tag: android.nfc.Tag) {
         val cardId = tag.id.joinToString("") { "%02X".format(it) }
         
+        // Variable to store AIDs extracted from PPSE response (dynamic)
+        var extractedAids = listOf<String>()
+        
         // Connect to card using IsoDep for real NFC communication
         val isoDep = android.nfc.tech.IsoDep.get(tag)
         if (isoDep != null) {
@@ -252,6 +255,8 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                             statusMessage = "PPSE Success - Found ${realAids.size} AID(s)"
                         }
                         Timber.i("PPSE returned ${realAids.size} real AIDs: ${realAids.joinToString(", ")}")
+                        // Store real AIDs for use in AID selection phase
+                        extractedAids = realAids
                     }
                 }
             } else {
@@ -261,25 +266,35 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 Timber.e("PPSE command failed - no response from card")
             }
             
-            // Phase 2: Parse PPSE and SELECT first AID found
+            // Phase 2: Parse PPSE and SELECT AIDs dynamically from PPSE response
             withContext(Dispatchers.Main) {
                 currentPhase = "AID Selection"
                 progress = 0.2f
                 statusMessage = "Selecting AID..."
             }
             
-            // Try multiple common AIDs like Proxmark3 does
-            val commonAids = listOf(
-                byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x04, 0x10, 0x10), // MasterCard
-                byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x03, 0x10, 0x10), // Visa
-                byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x25, 0x01), // Amex
-                byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x01, 0x52, 0x30, 0x10) // Discover
-            )
+            // Use AIDs extracted from PPSE response (dynamic, real transaction)
+            // Fallback to common AIDs only if PPSE failed
+            val aidsToTry = if (extractedAids.isNotEmpty()) {
+                Timber.i("Using ${extractedAids.size} AIDs from PPSE response (dynamic)")
+                // Convert hex strings to ByteArray
+                extractedAids.map { hexString ->
+                    hexString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                }
+            } else {
+                Timber.w("PPSE failed - falling back to common AIDs (static)")
+                listOf(
+                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x04, 0x10, 0x10), // MasterCard
+                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x03, 0x10, 0x10), // Visa
+                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x25, 0x01), // Amex
+                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x01, 0x52, 0x30, 0x10) // Discover
+                )
+            }
             
             var aidSelected = false
             var selectedAidHex = ""
             
-            for (aid in commonAids) {
+            for (aid in aidsToTry) {
                 val aidCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid
                 val aidResponse = if (isoDep != null) isoDep.transceive(aidCommand) else null
                 
