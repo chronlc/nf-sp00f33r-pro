@@ -539,9 +539,9 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
-                        reverseLayout = false // Show newest at top (real-time order)
+                        reverseLayout = true // Show newest at top (real-time order)
                     ) {
-                        items(viewModel.apduLog.takeLast(20).reversed()) { apduEntry ->
+                        items(viewModel.apduLog.takeLast(20)) { apduEntry ->
                             ApduLogItemParsed(apduEntry)
                         }
                     }

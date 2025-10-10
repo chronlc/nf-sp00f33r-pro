@@ -380,8 +380,9 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             if (gpoResponse != null) {
                 val gpoHex = gpoResponse.joinToString("") { "%02X".format(it) }
                 val realStatusWord = if (gpoHex.length >= 4) gpoHex.takeLast(4) else "UNKNOWN"
+                val gpoCommandHex = gpoCommand.joinToString("") { "%02X".format(it) }
                 addApduLogEntry(
-                    "80A8000002830000",
+                    gpoCommandHex,
                     gpoHex,
                     realStatusWord,
                     "GET PROCESSING OPTIONS",
