@@ -648,10 +648,85 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 statusMessage = "Additional scan: $additionalRecordsRead extra records found"
             }
             
-            // Phase 5: GET DATA for specific EMV tags (PROXMARK3 style)
+            // Phase 5: GENERATE AC (Application Cryptogram)
+            withContext(Dispatchers.Main) {
+                currentPhase = "GENERATE AC"
+                progress = 0.75f
+                statusMessage = "Generating cryptogram..."
+            }
+            
+            // Extract CDOL1 from records for GENERATE AC data building
+            val cdol1Data = extractCdol1FromAllResponses(apduLog)
+            val generateAcData = if (cdol1Data.isNotEmpty()) {
+                // Parse CDOL1 and build dynamic data
+                val cdolEntries = EmvTlvParser.parseDol(cdol1Data)
+                Timber.i("CDOL1 contains ${cdolEntries.size} entries")
+                buildCdolData(cdolEntries)
+            } else {
+                // No CDOL1 - use minimal data
+                Timber.w("No CDOL1 found - using minimal GENERATE AC data")
+                byteArrayOf()
+            }
+            
+            // GENERATE AC command: 80 AE [RefControl] 00 [Lc] [Data] 00
+            // RefControl: 80 = ARQC (online auth request), 40 = TC (transaction certificate), 00 = AAC (declined)
+            val generateAcCommand = if (generateAcData.isNotEmpty()) {
+                byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), generateAcData.size.toByte()) + generateAcData + byteArrayOf(0x00)
+            } else {
+                // Minimal GENERATE AC for ARQC
+                byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), 0x00, 0x00)
+            }
+            
+            val generateAcResponse = if (isoDep != null) isoDep.transceive(generateAcCommand) else null
+            
+            if (generateAcResponse != null) {
+                val generateAcHex = generateAcResponse.joinToString("") { "%02X".format(it) }
+                val realStatusWord = if (generateAcHex.length >= 4) generateAcHex.takeLast(4) else "UNKNOWN"
+                val generateAcCommandHex = generateAcCommand.joinToString("") { "%02X".format(it) }
+                addApduLogEntry(
+                    generateAcCommandHex,
+                    generateAcHex,
+                    realStatusWord,
+                    "GENERATE AC (ARQC)",
+                    0L
+                )
+                
+                when (realStatusWord) {
+                    "9000" -> {
+                        displayParsedData("GENERATE_AC", generateAcHex)
+                        
+                        // Extract cryptogram data
+                        val arqc = extractCryptogramFromAllResponses(apduLog)
+                        val cid = extractCidFromAllResponses(apduLog)
+                        val atc = extractAtcFromAllResponses(apduLog)
+                        
+                        withContext(Dispatchers.Main) {
+                            statusMessage = "GENERATE AC Success: ARQC=$arqc CID=$cid ATC=$atc"
+                        }
+                        Timber.i("GENERATE AC successful - ARQC: $arqc, CID: $cid, ATC: $atc")
+                    }
+                    "6985" -> {
+                        statusMessage = "GENERATE AC Failed: Conditions not satisfied"
+                        Timber.w("GENERATE AC failed - conditions not satisfied")
+                    }
+                    "6A88" -> {
+                        statusMessage = "GENERATE AC Failed: Referenced data not found"
+                        Timber.w("GENERATE AC failed - referenced data not found")
+                    }
+                    else -> {
+                        statusMessage = "GENERATE AC Failed: SW=$realStatusWord"
+                        Timber.w("GENERATE AC failed with SW=$realStatusWord")
+                    }
+                }
+            } else {
+                statusMessage = "GENERATE AC: No response from card"
+                Timber.e("GENERATE AC command failed - no response")
+            }
+            
+            // Phase 6: GET DATA for specific EMV tags (PROXMARK3 style)
             withContext(Dispatchers.Main) {
                 currentPhase = "GET DATA"
-                progress = 0.8f
+                progress = 0.85f
                 statusMessage = "Getting EMV data..."
             }
             
@@ -987,6 +1062,112 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val result = byteArrayOf(0x83.toByte(), totalLength.toByte()) + dataList.toByteArray()
         
         Timber.i("Built PDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
+        return result
+    }
+    
+    /**
+     * Build dynamic CDOL data for GENERATE AC command
+     * Similar to PDOL but uses actual transaction data from card session
+     * Proxmark3-inspired GENERATE AC data generation
+     */
+    private fun buildCdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
+        val dataList = mutableListOf<Byte>()
+        val secureRandom = SecureRandom()
+        val dateFormat = SimpleDateFormat("yyMMdd", Locale.US)
+        val currentDate = dateFormat.format(Date())
+        
+        Timber.d("Building CDOL data for ${dolEntries.size} entries")
+        
+        for (entry in dolEntries) {
+            val tagData = when (entry.tag.uppercase()) {
+                "9F37" -> {
+                    // Unpredictable Number - use fresh random for GENERATE AC
+                    val un = ByteArray(entry.length)
+                    secureRandom.nextBytes(un)
+                    Timber.d("CDOL: 9F37 (Unpredictable Number) = ${un.joinToString("") { "%02X".format(it) }}")
+                    un
+                }
+                "9A" -> {
+                    // Transaction Date - YYMMDD format
+                    val dateBytes = ByteArray(entry.length)
+                    val dateHex = currentDate.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    System.arraycopy(dateHex, 0, dateBytes, 0, minOf(dateHex.size, entry.length))
+                    Timber.d("CDOL: 9A (Transaction Date) = $currentDate")
+                    dateBytes
+                }
+                "9C" -> {
+                    // Transaction Type - 0x00 for goods/services
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "5F2A" -> {
+                    // Transaction Currency Code - 0x0840 for USD
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "9F02" -> {
+                    // Amount, Authorised - 6 bytes BCD
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F03" -> {
+                    // Amount, Other - 6 bytes BCD
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F1A" -> {
+                    // Terminal Country Code - 0x0840 for USA
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "95" -> {
+                    // Terminal Verification Results (TVR) - 5 bytes
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F66" -> {
+                    // Terminal Transaction Qualifiers (TTQ) - 4 bytes
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xF6.toByte()
+                            1 -> 0x20.toByte()
+                            2 -> 0xC0.toByte()
+                            3 -> 0x80.toByte()
+                            else -> 0x00
+                        }
+                    }
+                }
+                "9F36" -> {
+                    // ATC (Application Transaction Counter) - extract from previous responses
+                    val atcHex = extractAtcFromAllResponses(apduLog)
+                    if (atcHex.isNotEmpty()) {
+                        atcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    } else {
+                        ByteArray(entry.length) { 0x00 }
+                    }
+                }
+                "9F10" -> {
+                    // Issuer Application Data - extract from previous responses
+                    val iadHex = extractIadFromAllResponses(apduLog)
+                    if (iadHex.isNotEmpty()) {
+                        val iadBytes = iadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        if (iadBytes.size <= entry.length) {
+                            iadBytes + ByteArray(entry.length - iadBytes.size) { 0x00 }
+                        } else {
+                            iadBytes.take(entry.length).toByteArray()
+                        }
+                    } else {
+                        ByteArray(entry.length) { 0x00 }
+                    }
+                }
+                else -> {
+                    // Unknown tag - fill with zeros
+                    Timber.w("CDOL: Unknown tag ${entry.tag} - filling with zeros")
+                    ByteArray(entry.length) { 0x00 }
+                }
+            }
+            
+            dataList.addAll(tagData.toList())
+        }
+        
+        val totalLength = dataList.size
+        val result = dataList.toByteArray()
+        
+        Timber.i("Built CDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
         return result
     }
     
