@@ -75,6 +75,22 @@ data class EmvCardData(
     // EMV Tags Map for dynamic parsing
     val emvTags: Map<String, String> = emptyMap(),
 
+    // iCVV/Dynamic CVV parameters
+    val icvvCapable: Boolean = false,
+    val icvvTrack1Bitmap: String? = null,
+    val icvvTrack1AtcDigits: Int? = null,
+    val icvvTrack1UnSize: Int? = null,
+    val icvvTrack2Bitmap: String? = null,
+    val icvvTrack2UnSize: Int? = null,
+    val icvvStatus: String? = null,
+    val icvvParameters: String? = null,
+
+    // ROCA Vulnerability Analysis
+    val rocaVulnerable: Boolean = false,
+    val rocaVulnerabilityStatus: String? = null,
+    val rocaAnalysisDetails: String? = null,
+    val rocaCertificatesAnalyzed: Int = 0,
+
     // APDU Logs for dynamic processing
     var apduLog: List<ApduLogEntry> = emptyList(),
 

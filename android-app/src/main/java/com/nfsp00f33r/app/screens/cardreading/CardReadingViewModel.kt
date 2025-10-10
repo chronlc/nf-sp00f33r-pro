@@ -26,6 +26,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
+import com.nfsp00f33r.app.cardreading.EmvTagDictionary
 
 /**
  * PRODUCTION-GRADE Card Reading ViewModel
@@ -90,6 +91,9 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         private set
     
     var isAutoSelectEnabled by mutableStateOf(true)
+        private set
+    
+    var forceContactMode by mutableStateOf(false)
         private set
     
     var currentPhase by mutableStateOf("Ready")
@@ -203,6 +207,11 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private suspend fun executeProxmark3EmvWorkflow(tag: android.nfc.Tag) {
         val cardId = tag.id.joinToString("") { "%02X".format(it) }
         
+        // Clear previous ROCA analysis results
+        EmvTlvParser.clearRocaAnalysisResults()
+        rocaVulnerabilityStatus = "Analyzing..."
+        isRocaVulnerable = false
+        
         // Variable to store AIDs extracted from PPSE response (dynamic)
         var extractedAids = listOf<String>()
         
@@ -215,30 +224,91 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         try {
             // PROXMARK3 EMV WORKFLOW - EXACT MATCH
             
-            // Phase 1: SELECT PPSE (2PAY.SYS.DDF01)
+            // Phase 1: SELECT PPSE - Try contactless (2PAY) or contact (1PAY) based on mode
             withContext(Dispatchers.Main) {
                 currentPhase = "PPSE Selection"
                 progress = 0.1f
-                statusMessage = "Selecting PPSE..."
+                statusMessage = if (forceContactMode) {
+                    "Selecting PPSE (Contact Mode - 1PAY)..."
+                } else {
+                    "Selecting PPSE (Auto: 2PAY→1PAY fallback)..."
+                }
             }
             
-            val ppseCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E, 
-                0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
-            val ppseResponse = if (isoDep != null) isoDep.transceive(ppseCommand) else null
+            var ppseResponse: ByteArray? = null
+            var ppseMode = ""
+            var ppseHex = ""
+            var realStatusWord = "UNKNOWN"
+            
+            if (forceContactMode) {
+                // Force contact mode: Use 1PAY.SYS.DDF01 only
+                Timber.i("🔧 FORCED CONTACT MODE: Using 1PAY.SYS.DDF01")
+                val ppse1PayCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E,
+                    0x31, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
+                ppseResponse = if (isoDep != null) isoDep.transceive(ppse1PayCommand) else null
+                ppseMode = "1PAY (Contact) [FORCED]"
+                
+                if (ppseResponse != null) {
+                    ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
+                    realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
+                    addApduLogEntry(
+                        "00A404000E315041592E5359532E4444463031",
+                        ppseHex,
+                        realStatusWord,
+                        "SELECT PPSE (1PAY) [FORCED]",
+                        0L
+                    )
+                }
+            } else {
+                // Auto mode: Try 2PAY.SYS.DDF01 (contactless) first, fallback to 1PAY
+                val ppse2PayCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E, 
+                    0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
+                ppseResponse = if (isoDep != null) isoDep.transceive(ppse2PayCommand) else null
+                ppseMode = "2PAY (Contactless)"
+                
+                if (ppseResponse != null) {
+                    ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
+                    realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
+                    addApduLogEntry(
+                        "00A404000E325041592E5359532E4444463031",
+                        ppseHex,
+                        realStatusWord,
+                        "SELECT PPSE (2PAY)",
+                        0L
+                    )
+                    
+                    // If 2PAY failed, try 1PAY.SYS.DDF01 (contact)
+                    if (realStatusWord != "9000") {
+                        Timber.i("2PAY failed (SW=$realStatusWord), trying 1PAY (contact mode) as fallback")
+                        withContext(Dispatchers.Main) {
+                            statusMessage = "2PAY failed, trying 1PAY (contact)..."
+                        }
+                        
+                        val ppse1PayCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E,
+                            0x31, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
+                        ppseResponse = if (isoDep != null) isoDep.transceive(ppse1PayCommand) else null
+                        ppseMode = "1PAY (Contact) [FALLBACK]"
+                        
+                        if (ppseResponse != null) {
+                            ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
+                            realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
+                            addApduLogEntry(
+                                "00A404000E315041592E5359532E4444463031",
+                                ppseHex,
+                                realStatusWord,
+                                "SELECT PPSE (1PAY) [FALLBACK]",
+                                0L
+                            )
+                        }
+                    }
+                }
+            }
             
             if (ppseResponse != null) {
-                val ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
-                val realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
-                addApduLogEntry(
-                    "00A404000E325041592E5359532E4444463031",
-                    ppseHex,
-                    realStatusWord,
-                    "SELECT PPSE",
-                    0L
-                )
+                
                 displayParsedData("PPSE", ppseHex)
                 withContext(Dispatchers.Main) {
-                    statusMessage = "PPSE: SW=$realStatusWord"
+                    statusMessage = "PPSE ($ppseMode): SW=$realStatusWord"
                 }
                 
                 // LIVE ANALYSIS: Check if PPSE failed, try different approach
@@ -246,15 +316,15 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     withContext(Dispatchers.Main) {
                         statusMessage = "PPSE Failed ($realStatusWord) - Trying direct AID selection"
                     }
-                    Timber.w("PPSE selection failed with SW=$realStatusWord, switching strategy")
+                    Timber.w("PPSE selection failed with SW=$realStatusWord (tried both 2PAY and 1PAY), switching strategy")
                 } else {
                     // Parse PPSE response for real AIDs
                     val realAids = extractAidsFromPpseResponse(ppseHex)
                     if (realAids.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
-                            statusMessage = "PPSE Success - Found ${realAids.size} AID(s)"
+                            statusMessage = "PPSE Success ($ppseMode) - Found ${realAids.size} AID(s)"
                         }
-                        Timber.i("PPSE returned ${realAids.size} real AIDs: ${realAids.joinToString(", ")}")
+                        Timber.i("PPSE ($ppseMode) returned ${realAids.size} real AIDs: ${realAids.joinToString(", ")}")
                         // Store real AIDs for use in AID selection phase
                         extractedAids = realAids
                     }
@@ -443,6 +513,18 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                                 }
                                 Timber.w("GPO succeeded but no parseable EMV data in response")
                             }
+                        }
+                        
+                        // Check for cryptogram in GPO response (Visa Quick VSDC cards return cryptogram in GPO)
+                        val cryptogram = extractCryptogramFromAllResponses(apduLog)
+                        val cid = extractCidFromAllResponses(apduLog)
+                        val atc = extractAtcFromAllResponses(apduLog)
+                        
+                        if (cryptogram.isNotEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                statusMessage += " | Cryptogram: ${cryptogram.take(8)}..."
+                            }
+                            Timber.i("GPO returned cryptogram directly (Visa Quick VSDC): AC=$cryptogram, CID=$cid, ATC=$atc")
                         }
                         
                         // Parse AFL using EmvTlvParser for dynamic record reading
@@ -648,33 +730,77 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 statusMessage = "Additional scan: $additionalRecordsRead extra records found"
             }
             
-            // Phase 5: GENERATE AC (Application Cryptogram)
-            withContext(Dispatchers.Main) {
-                currentPhase = "GENERATE AC"
-                progress = 0.75f
-                statusMessage = "Generating cryptogram..."
+            // Phase 5: GENERATE AC (Application Cryptogram) - Skip if already obtained in GPO
+            val existingCryptogram = extractCryptogramFromAllResponses(apduLog)
+            
+            if (existingCryptogram.isNotEmpty()) {
+                Timber.i("Cryptogram already obtained in GPO response (Visa Quick VSDC) - skipping GENERATE AC")
+                withContext(Dispatchers.Main) {
+                    currentPhase = "Cryptogram (from GPO)"
+                    progress = 0.75f
+                    statusMessage = "Cryptogram already obtained: ${existingCryptogram.take(16)}..."
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    currentPhase = "GENERATE AC"
+                    progress = 0.75f
+                    statusMessage = "Generating cryptogram..."
+                }
             }
             
             // Extract CDOL1 from records for GENERATE AC data building
             val cdol1Data = extractCdol1FromAllResponses(apduLog)
-            val generateAcData = if (cdol1Data.isNotEmpty()) {
+            android.util.Log.e("DEBUG_CDOL", "=== CDOL1 EXTRACTION DEBUG ===")
+            android.util.Log.e("DEBUG_CDOL", "Extracted CDOL1 data: '$cdol1Data'")
+            android.util.Log.e("DEBUG_CDOL", "CDOL1 length: ${cdol1Data.length} chars = ${cdol1Data.length / 2} bytes")
+            
+            // CDOL1 must be at least 4 hex chars (2 bytes): 1-byte tag + 1-byte length minimum
+            // Example valid CDOL1: "9F3704" (tag 9F37, length 4 bytes)
+            // Invalid: "F6" (only 1 byte, not a valid tag-length pair)
+            val isValidCdol = cdol1Data.length >= 4
+            android.util.Log.e("DEBUG_CDOL", "Validation: isEmpty=${cdol1Data.isEmpty()}, length>= 4=$isValidCdol")
+            Timber.d("Extracted CDOL1 data: $cdol1Data (${cdol1Data.length / 2} bytes)")
+            
+            val generateAcData = if (isValidCdol) {
                 // Parse CDOL1 and build dynamic data
-                val cdolEntries = EmvTlvParser.parseDol(cdol1Data)
-                Timber.i("CDOL1 contains ${cdolEntries.size} entries")
-                buildCdolData(cdolEntries)
+                // CDOL must be at least 2 bytes (1 tag + 1 length minimum)
+                try {
+                    android.util.Log.e("DEBUG_CDOL", "Attempting to parse CDOL1 as DOL...")
+                    val cdolEntries = EmvTlvParser.parseDol(cdol1Data)
+                    android.util.Log.e("DEBUG_CDOL", "Parsed ${cdolEntries.size} CDOL entries")
+                    cdolEntries.forEachIndexed { idx, entry ->
+                        android.util.Log.e("DEBUG_CDOL", "  Entry $idx: tag=${entry.tag}, length=${entry.length}")
+                    }
+                    if (cdolEntries.isNotEmpty()) {
+                        Timber.i("CDOL1 contains ${cdolEntries.size} entries: ${cdolEntries.joinToString { "${it.tag}(${it.length})" }}")
+                        val builtData = buildCdolData(cdolEntries)
+                        android.util.Log.e("DEBUG_CDOL", "Built CDOL data: ${builtData.size} bytes")
+                        builtData
+                    } else {
+                        android.util.Log.e("DEBUG_CDOL", "No entries parsed - using minimal GENERATE AC")
+                        Timber.w("CDOL1 parsed but no entries - using minimal GENERATE AC")
+                        byteArrayOf()
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("DEBUG_CDOL", "EXCEPTION parsing CDOL1: ${e.message}")
+                    e.printStackTrace()
+                    Timber.e(e, "Failed to parse CDOL1: $cdol1Data")
+                    byteArrayOf()
+                }
             } else {
-                // No CDOL1 - use minimal data
-                Timber.w("No CDOL1 found - using minimal GENERATE AC data")
+                // No CDOL1 or invalid CDOL1 - use minimal data
+                Timber.w("No valid CDOL1 found (data=$cdol1Data) - using minimal GENERATE AC data")
                 byteArrayOf()
             }
             
-            // GENERATE AC command: 80 AE [RefControl] 00 [Lc] [Data] 00
+            // GENERATE AC command: 80 AE [RefControl] 00 [Lc] [Data] [Le]
             // RefControl: 80 = ARQC (online auth request), 40 = TC (transaction certificate), 00 = AAC (declined)
             val generateAcCommand = if (generateAcData.isNotEmpty()) {
                 byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), generateAcData.size.toByte()) + generateAcData + byteArrayOf(0x00)
             } else {
-                // Minimal GENERATE AC for ARQC
-                byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), 0x00, 0x00)
+                // Minimal GENERATE AC for ARQC (no data, no Le)
+                // ISO 7816-4: When Lc=0 (no command data), Le should be omitted (Case 1 command)
+                byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), 0x00)
             }
             
             val generateAcResponse = if (isoDep != null) isoDep.transceive(generateAcCommand) else null
@@ -1174,121 +1300,69 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Extract detailed EMV data from response - COMPREHENSIVE PARSING
      */
+    /**
+     * Extract detailed EMV data using comprehensive TLV parser
+     */
     private fun extractDetailedEmvData(hexResponse: String): Map<String, String> {
         val details = mutableMapOf<String, String>()
         
         try {
-            // Parse common EMV tags with detailed extraction
-            val tagDefinitions = mapOf(
-                "5A" to "PAN",
-                "57" to "Track2", 
-                "5F20" to "Cardholder Name",
-                "5F24" to "Expiry Date",
-                "5F25" to "Effective Date",
-                "5F28" to "Issuer Country Code",
-                "5F2A" to "Transaction Currency Code",
-                "5F30" to "Service Code",
-                "82" to "AIP",
-                "84" to "DF Name",
-                "87" to "Application Priority",
-                "8C" to "CDOL1",
-                "8D" to "CDOL2", 
-                "8E" to "CVM List",
-                "94" to "AFL",
-                "95" to "TVR",
-                "9A" to "Transaction Date",
-                "9C" to "Transaction Type",
-                "9F02" to "Amount Authorized",
-                "9F03" to "Amount Other",
-                "9F06" to "AID",
-                "9F07" to "Application Usage Control",
-                "9F08" to "Application Version",
-                "9F09" to "Application Version",
-                "9F0D" to "IAC Default",
-                "9F0E" to "IAC Denial", 
-                "9F0F" to "IAC Online",
-                "9F10" to "Issuer Application Data",
-                "9F11" to "Issuer Code Table Index",
-                "9F12" to "Application Preferred Name",
-                "9F13" to "Last Online ATC",
-                "9F14" to "Lower Consecutive Offline Limit",
-                "9F15" to "Merchant Category Code",
-                "9F16" to "Merchant Identifier",
-                "9F17" to "PIN Try Counter",
-                "9F18" to "Issuer Script Identifier",
-                "9F1A" to "Terminal Country Code",
-                "9F1B" to "Terminal Floor Limit",
-                "9F1C" to "Terminal Identification",
-                "9F1D" to "Terminal Risk Management Data",
-                "9F1E" to "Interface Device Serial Number",
-                "9F1F" to "Track 1 Discretionary Data",
-                "9F20" to "Track 2 Discretionary Data",
-                "9F21" to "Transaction Time",
-                "9F22" to "Certification Authority Public Key Index",
-                "9F23" to "Upper Consecutive Offline Limit",
-                "9F26" to "Application Cryptogram",
-                "9F27" to "Cryptogram Information Data",
-                "9F2D" to "ICC PIN Encipherment Public Key Certificate",
-                "9F2E" to "ICC PIN Encipherment Public Key Exponent",
-                "9F2F" to "ICC PIN Encipherment Public Key Remainder",
-                "9F32" to "Issuer Public Key Exponent",
-                "9F33" to "Terminal Capabilities",
-                "9F34" to "Cardholder Verification Method Results",
-                "9F35" to "Terminal Type",
-                "9F36" to "Application Transaction Counter",
-                "9F37" to "Unpredictable Number",
-                "9F38" to "PDOL",
-                "9F39" to "Point-of-Service Entry Mode",
-                "9F3A" to "Amount Reference Currency",
-                "9F3B" to "Application Reference Currency",
-                "9F3C" to "Transaction Reference Currency Code",
-                "9F3D" to "Transaction Reference Currency Exponent",
-                "9F40" to "Additional Terminal Capabilities",
-                "9F41" to "Transaction Sequence Counter",
-                "9F42" to "Application Currency Code",
-                "9F43" to "Application Reference Currency Exponent",
-                "9F44" to "Application Currency Exponent",
-                "9F45" to "Data Authentication Code",
-                "9F46" to "ICC Public Key Certificate",
-                "9F47" to "ICC Public Key Exponent",
-                "9F48" to "ICC Public Key Remainder",
-                "9F49" to "Dynamic Data Authentication Data Object List",
-                "9F4A" to "Static Data Authentication Tag List",
-                "9F4B" to "Signed Dynamic Application Data",
-                "9F4C" to "ICC Dynamic Number",
-                "9F4D" to "Log Entry",
-                "9F4E" to "Merchant Name and Location",
-                "9F4F" to "Log Format",
-                "9F66" to "Terminal Transaction Qualifiers",
-                "9F6E" to "Form Factor Indicator"
+            // Convert hex string to byte array
+            val responseBytes = hexResponse.chunked(2).mapNotNull { 
+                it.toIntOrNull(16)?.toByte() 
+            }.toByteArray()
+            
+            // Parse ALL TLV tags comprehensively using EmvTlvParser
+            val parseResult = EmvTlvParser.parseEmvTlvData(
+                responseBytes, 
+                "DetailedExtraction", 
+                validateTags = true
             )
             
-            tagDefinitions.forEach { (tag, description) ->
-                val pattern = "$tag([0-9A-F]{2})([0-9A-F]+)".toRegex()
-                val match = pattern.find(hexResponse)
-                if (match != null) {
-                    val length = match.groupValues[1].toInt(16) * 2
-                    val value = match.groupValues[2].take(length)
-                    
-                    // Special processing for specific tags
-                    val processedValue = when (tag) {
-                        "5A" -> formatPan(value) // PAN
-                        "57" -> formatTrack2(value) // Track 2
-                        "5F20" -> hexToAscii(value) // Cardholder Name
-                        "5F24" -> formatExpiryDate(value) // Expiry Date
-                        "5F25" -> formatEffectiveDate(value) // Effective Date
-                        "84" -> hexToAscii(value) // DF Name
-                        "9F12" -> hexToAscii(value) // Application Preferred Name
-                        else -> value
-                    }
-                    
-                    details[description.lowercase().replace(" ", "_")] = processedValue
-                    details["raw_$tag"] = value
+            Timber.d("🔍 extractDetailedEmvData: Parsed ${parseResult.tags.size} tags from response")
+            
+            // Process all parsed tags
+            parseResult.tags.forEach { (tag, value) ->
+                val tagName = EmvTagDictionary.getTagDescription(tag)
+                val fieldKey = tagName.lowercase().replace(" ", "_")
+                
+                // Special processing for specific tags
+                val processedValue = when (tag) {
+                    "5A" -> formatPan(value) // PAN
+                    "57" -> formatTrack2(value) // Track 2
+                    "5F20" -> hexToAscii(value) // Cardholder Name
+                    "5F24" -> formatExpiryDate(value) // Expiry Date
+                    "5F25" -> formatEffectiveDate(value) // Effective Date
+                    "84" -> hexToAscii(value) // DF Name
+                    "50" -> hexToAscii(value) // Application Label
+                    "9F12" -> hexToAscii(value) // Application Preferred Name
+                    else -> value
                 }
+                
+                details[fieldKey] = processedValue
+                details["raw_$tag"] = value
+                
+                Timber.d("  📋 $tag ($tagName) = ${value.take(32)}${if (value.length > 32) "..." else ""}")
+            }
+            
+            // Add parse statistics
+            details["_total_tags"] = parseResult.tags.size.toString()
+            details["_valid_tags"] = parseResult.validTags.toString()
+            details["_invalid_tags"] = parseResult.invalidTags.toString()
+            details["_template_depth"] = parseResult.templateDepth.toString()
+            
+            if (parseResult.errors.isNotEmpty()) {
+                details["_parse_errors"] = parseResult.errors.joinToString("; ")
+                Timber.w("⚠️ Parse errors: ${parseResult.errors.joinToString(", ")}")
+            }
+            
+            if (parseResult.warnings.isNotEmpty()) {
+                details["_parse_warnings"] = parseResult.warnings.joinToString("; ")
+                Timber.w("⚠️ Parse warnings: ${parseResult.warnings.joinToString(", ")}")
             }
             
         } catch (e: Exception) {
-            Timber.e(e, "Error extracting detailed EMV data")
+            Timber.e(e, "Error extracting detailed EMV data with EmvTlvParser")
         }
         
         return details
@@ -1627,13 +1701,43 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     
     private fun extractCdol1FromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
         apduLog.forEach { apdu ->
-            val cdol1Regex = "8C([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = cdol1Regex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
+            // CDOL1 (tag 8C) is typically in SELECT AID response (FCI template)
+            // Skip READ RECORD responses (SFI records contain RSA certs with false "8C" matches)
+            if (apdu.description.contains("READ RECORD", ignoreCase = true)) {
+                android.util.Log.d("CDOL_EXTRACT", "Skipping READ RECORD response: ${apdu.description}")
+                return@forEach // Skip this APDU
+            }
+            
+            val response = apdu.response
+            android.util.Log.d("CDOL_EXTRACT", "Searching for tag 8C in: ${apdu.description}")
+            
+            var i = 0
+            while (i < response.length - 4) { // Need at least tag(2) + length(2)
+                if (response.substring(i, i + 2) == "8C") {
+                    val lengthByte = response.substring(i + 2, i + 4)
+                    val lengthInt = try { lengthByte.toInt(16) } catch (e: Exception) { -1 }
+                    
+                    if (lengthInt < 0 || lengthInt > 50) {
+                        // Invalid length for CDOL1 (should be < 50 bytes typically)
+                        android.util.Log.d("CDOL_EXTRACT", "Invalid CDOL1 length $lengthInt at position $i, skipping")
+                        i += 2
+                        continue
+                    }
+                    
+                    val length = lengthInt * 2 // Convert to hex chars
+                    
+                    // Extract CDOL data
+                    if (i + 4 + length <= response.length) {
+                        val cdolData = response.substring(i + 4, i + 4 + length)
+                        android.util.Log.d("CDOL_EXTRACT", "Found tag 8C at position $i, length=$lengthByte ($lengthInt bytes): $cdolData")
+                        return cdolData
+                    }
+                }
+                i += 2 // Move to next byte boundary
             }
         }
+        
+        android.util.Log.w("CDOL_EXTRACT", "No CDOL1 found in any response - card may not require CDOL")
         return ""
     }
     
@@ -1709,20 +1813,22 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return ""
     }
     
+    /**
+     * Build comprehensive EMV tags map using parsedEmvFields from EmvTlvParser
+     * Returns ALL tags extracted during the complete EMV workflow
+     */
     private fun buildRealEmvTagsMap(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>, pan: String, aid: String, track2: String): Map<String, String> {
         val tags = mutableMapOf<String, String>()
         
-        // Only add tags if we have real data
+        // Use ALL tags from comprehensive TLV parser (parsedEmvFields)
+        tags.putAll(parsedEmvFields)
+        
+        // Ensure critical tags are present
         if (pan.isNotEmpty()) tags["5A"] = pan
         if (aid.isNotEmpty()) tags["4F"] = aid  
         if (track2.isNotEmpty()) tags["57"] = track2
         
-        // Extract all other tags from real responses
-        apduLog.forEach { apdu ->
-            extractAllTagsFromResponse(apdu.response).forEach { (tag, value) ->
-                if (value.isNotEmpty()) tags[tag] = value
-            }
-        }
+        Timber.i("📦 Built EMV tags map: ${tags.size} total tags from comprehensive parsing")
         
         return tags.toMap()
     }
@@ -1759,51 +1865,350 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Display parsed EMV data in real-time
      */
+    /**
+     * Comprehensive TLV parsing using EmvTlvParser - parses ALL tags recursively
+     */
     private fun displayParsedData(phase: String, hexData: String) {
         try {
-            val parsedTags = mutableListOf<String>()
+            // Convert hex string to byte array
+            val responseBytes = hexData.chunked(2).mapNotNull { 
+                it.toIntOrNull(16)?.toByte() 
+            }.toByteArray()
             
-            // Parse common EMV tags
-            val tagPatterns = mapOf(
-                "4F" to "AID",
-                "50" to "App Label", 
-                "57" to "Track2",
-                "5A" to "PAN",
-                "5F24" to "Expiry",
-                "5F25" to "Effective",
-                "5F28" to "Country",
-                "82" to "AIP",
-                "84" to "DF Name",
-                "87" to "Priority",
-                "94" to "AFL",
-                "9F06" to "AID",
-                "9F07" to "AUC",
-                "9F08" to "Version",
-                "9F26" to "Cryptogram",
-                "9F27" to "CID",
-                "9F36" to "ATC"
+            // Parse ALL TLV tags comprehensively using EmvTlvParser
+            val parseResult = EmvTlvParser.parseEmvTlvData(
+                responseBytes, 
+                phase, 
+                validateTags = true
             )
             
-            tagPatterns.forEach { (tag, name) ->
-                val pattern = "$tag([0-9A-F]{2})([0-9A-F]+)".toRegex()
-                val match = pattern.find(hexData)
-                if (match != null) {
-                    val length = match.groupValues[1].toInt(16) * 2
-                    val value = match.groupValues[2].take(length)
-                    when (name) {
-                        "PAN", "Track2" -> parsedTags.add("$name: ${value.take(6)}****${value.takeLast(4)}")
-                        else -> parsedTags.add("$name: ${value.take(8)}${if (value.length > 8) "..." else ""}")
+            var parsedInfo = "📋 $phase Parsed Data:\n"
+            
+            if (parseResult.tags.isNotEmpty()) {
+                // Update parsedEmvFields with ALL extracted tags
+                parsedEmvFields = parsedEmvFields + parseResult.tags
+                
+                // Display summary of parsed tags
+                parsedInfo += "  ✅ Total: ${parseResult.tags.size} tags extracted\n"
+                parsedInfo += "  ✅ Valid tags: ${parseResult.validTags}\n"
+                
+                if (parseResult.invalidTags > 0) {
+                    parsedInfo += "  ⚠️ Unknown tags: ${parseResult.invalidTags}\n"
+                }
+                
+                if (parseResult.templateDepth > 0) {
+                    parsedInfo += "  🔧 Template depth: ${parseResult.templateDepth}\n"
+                }
+                
+                // Display key tags (PAN, expiry, cryptogram, etc.)
+                val keyTags = listOf(
+                    "4F" to "AID",
+                    "50" to "App Label", 
+                    "5A" to "PAN",
+                    "57" to "Track2",
+                    "5F20" to "Cardholder Name",
+                    "5F24" to "Expiry",
+                    "5F28" to "Country",
+                    "82" to "AIP",
+                    "84" to "DF Name",
+                    "94" to "AFL",
+                    "9F06" to "AID",
+                    "9F07" to "AUC",
+                    "9F10" to "Issuer Application Data",
+                    "9F26" to "Cryptogram",
+                    "9F27" to "CID",
+                    "9F32" to "Issuer Public Key Exponent",
+                    "9F36" to "ATC",
+                    "9F38" to "PDOL",
+                    "9F46" to "ICC Public Key Certificate",
+                    "9F47" to "ICC Public Key Exponent",
+                    "9F4B" to "Signed Dynamic Application Data",
+                    "9F69" to "UDOL",
+                    "92" to "Issuer Public Key Remainder",
+                    "8F" to "CA Public Key Index"
+                )
+                
+                parsedInfo += "\n  🔑 Key Tags:\n"
+                var keyTagsFound = 0
+                
+                keyTags.forEach { (tag, name) ->
+                    val value = parseResult.tags[tag]
+                    if (value != null) {
+                        parsedInfo += "    • $name ($tag): ${value.take(32)}${if (value.length > 32) "..." else ""}\n"
+                        keyTagsFound++
                     }
+                }
+                
+                if (keyTagsFound == 0) {
+                    parsedInfo += "    (No key tags in this response)\n"
+                }
+                
+                // Display ALL other tags extracted
+                val otherTags = parseResult.tags.filterKeys { tag ->
+                    keyTags.none { it.first == tag }
+                }
+                
+                if (otherTags.isNotEmpty()) {
+                    parsedInfo += "\n  📦 Other Tags (${otherTags.size}):\n"
+                    otherTags.forEach { (tag, value) ->
+                        val tagName = EmvTagDictionary.getTagDescription(tag)
+                        parsedInfo += "    • $tagName ($tag): ${value.take(32)}${if (value.length > 32) "..." else ""}\n"
+                    }
+                }
+                
+                // Update status message with key info
+                val panValue = parseResult.tags["5A"]
+                val expiryValue = parseResult.tags["5F24"]
+                val cryptogramValue = parseResult.tags["9F26"]
+                
+                val statusParts = mutableListOf<String>()
+                if (panValue != null) statusParts.add("PAN: ${panValue.take(6)}****${panValue.takeLast(4)}")
+                if (expiryValue != null) statusParts.add("Exp: $expiryValue")
+                if (cryptogramValue != null) statusParts.add("Crypto: ${cryptogramValue.take(8)}...")
+                
+                if (statusParts.isEmpty()) {
+                    statusParts.add("${parseResult.tags.size} tags")
+                }
+                
+                statusMessage = "$phase: ${statusParts.take(2).joinToString(", ")}"
+                
+            } else {
+                parsedInfo += "  (No TLV tags found)\n"
+            }
+            
+            // Display errors and warnings
+            if (parseResult.errors.isNotEmpty()) {
+                parsedInfo += "\n  ❌ Errors:\n"
+                parseResult.errors.forEach { error ->
+                    parsedInfo += "    • $error\n"
                 }
             }
             
-            if (parsedTags.isNotEmpty()) {
-                statusMessage = "$phase: ${parsedTags.take(2).joinToString(", ")}"
+            if (parseResult.warnings.isNotEmpty()) {
+                parsedInfo += "\n  ⚠️ Warnings:\n"
+                parseResult.warnings.forEach { warning ->
+                    parsedInfo += "    • $warning\n"
+                }
+            }
+            
+            Timber.i(parsedInfo)
+            
+            // Store to database (TODO: implement database storage)
+            storeTagsToDatabase(phase, parseResult.tags)
+            
+            // Check for ROCA vulnerability analysis results
+            checkRocaVulnerability()
+            
+        } catch (e: Exception) {
+            Timber.e(e, "Error parsing $phase data with EmvTlvParser")
+        }
+    }
+    
+    /**
+     * Check ROCA vulnerability status from EmvTlvParser results
+     * Called after each TLV parsing phase to update ROCA status
+     */
+    private fun checkRocaVulnerability() {
+        try {
+            val rocaResults = EmvTlvParser.getRocaAnalysisResults()
+            
+            if (rocaResults.isNotEmpty()) {
+                // Find highest severity vulnerability
+                var highestConfidence = com.nfsp00f33r.app.security.RocaVulnerabilityAnalyzer.VulnerabilityConfidence.UNKNOWN
+                var anyVulnerable = false
+                var confirmedVulnerable = false
+                
+                rocaResults.forEach { (tagId, result) ->
+                    if (result.isVulnerable) {
+                        anyVulnerable = true
+                        
+                        if (result.confidence == com.nfsp00f33r.app.security.RocaVulnerabilityAnalyzer.VulnerabilityConfidence.CONFIRMED) {
+                            confirmedVulnerable = true
+                            highestConfidence = result.confidence
+                        } else if (result.confidence.ordinal > highestConfidence.ordinal) {
+                            highestConfidence = result.confidence
+                        }
+                        
+                        Timber.w("🚨 ROCA vulnerability detected in tag $tagId: confidence=${result.confidence}, factored=${result.factorAttempt?.successful}")
+                    }
+                }
+                
+                // Update ViewModel state
+                isRocaVulnerable = anyVulnerable
+                rocaVulnerabilityStatus = when {
+                    confirmedVulnerable -> "🚨 CONFIRMED ROCA VULNERABLE - RSA keys compromised!"
+                    highestConfidence == com.nfsp00f33r.app.security.RocaVulnerabilityAnalyzer.VulnerabilityConfidence.HIGHLY_LIKELY -> 
+                        "⚠️ HIGHLY LIKELY vulnerable to ROCA"
+                    highestConfidence == com.nfsp00f33r.app.security.RocaVulnerabilityAnalyzer.VulnerabilityConfidence.POSSIBLE -> 
+                        "⚡ POSSIBLE ROCA vulnerability"
+                    anyVulnerable -> "⚠️ ROCA vulnerability detected"
+                    else -> "✅ No ROCA vulnerability detected"
+                }
+                
+                Timber.i("ROCA Analysis: vulnerable=$anyVulnerable, status=$rocaVulnerabilityStatus, ${rocaResults.size} certificates analyzed")
             }
             
         } catch (e: Exception) {
-            Timber.e(e, "Error parsing EMV data")
+            Timber.e(e, "Error checking ROCA vulnerability")
+            rocaVulnerabilityStatus = "Error checking ROCA: ${e.message}"
         }
+    }
+    
+    /**
+     * Store all extracted tags - NO-OP as tags are already stored in parsedEmvFields
+     * and will be saved to emvTags map in EmvCardData when card is saved
+     */
+    private fun storeTagsToDatabase(phase: String, tags: Map<String, String>) {
+        // Tags are automatically stored in parsedEmvFields state variable
+        // and transferred to EmvCardData.emvTags via buildRealEmvTagsMap()
+        // No separate database storage needed - emvTags is part of the card record
+        Timber.d("✅ $phase: ${tags.size} tags added to parsedEmvFields (will be saved with card data)")
+    }
+    
+    // ==================== iCVV/Dynamic CVV Calculation ====================
+    
+    /**
+     * Calculate Unpredictable Number (UN) size based on Track bitmap
+     * Based on ChAP.py calculate_UNSize() function
+     * 
+     * @param bitmap Track bitmap value (9F63 for Track1, 9F66 for Track2)
+     * @param numDigits Number of ATC digits (9F64 for Track1)
+     * @return Number of bytes needed for unpredictable number
+     */
+    private fun calculateUnSize(bitmap: Long, numDigits: Int): Int {
+        var i = bitmap
+        
+        // Count bits set in bitmap using Brian Kernighan's algorithm
+        // This is the bit counting algorithm from ChAP.py
+        i = i - ((i shr 1) and 0x55555555L)
+        i = (i and 0x33333333L) + ((i shr 2) and 0x33333333L)
+        val bitsSet = (((i + (i shr 4)) and 0x0F0F0F0FL) * 0x01010101L) shr 24
+        
+        val unSize = bitsSet.toInt() - numDigits
+        
+        Timber.d("🔢 UN Size calculation: bitmap=0x${bitmap.toString(16)}, numDigits=$numDigits, bitsSet=$bitsSet, unSize=$unSize")
+        
+        return unSize
+    }
+    
+    /**
+     * Calculate iCVV/Dynamic CVV parameters from EMV tags
+     * Extracts Track 1/2 bitmaps and calculates required UN sizes
+     * 
+     * @return Map containing iCVV calculation parameters
+     */
+    private fun calculateDynamicCvvParams(): Map<String, Any> {
+        val params = mutableMapOf<String, Any>()
+        
+        try {
+            // Extract Track 1 bitmap and ATC digits (tag 9F63, 9F64)
+            val track1Bitmap = parsedEmvFields["9F63"]
+            val track1AtcDigits = parsedEmvFields["9F64"]
+            
+            if (track1Bitmap != null && track1AtcDigits != null) {
+                val bitmapValue = track1Bitmap.toLongOrNull(16) ?: 0L
+                val atcDigits = track1AtcDigits.toIntOrNull(16) ?: 0
+                val track1UnSize = calculateUnSize(bitmapValue, atcDigits)
+                
+                params["track1_bitmap"] = track1Bitmap
+                params["track1_atc_digits"] = atcDigits
+                params["track1_un_size"] = track1UnSize
+                
+                Timber.i("💳 Track 1 iCVV params: bitmap=$track1Bitmap, atcDigits=$atcDigits, unSize=$track1UnSize bytes")
+            }
+            
+            // Extract Track 2 bitmap (tag 9F65, 9F66)
+            val track2Cvc3Bitmap = parsedEmvFields["9F65"]
+            val track2UnAtcBitmap = parsedEmvFields["9F66"]
+            
+            if (track2UnAtcBitmap != null) {
+                val bitmapValue = track2UnAtcBitmap.toLongOrNull(16) ?: 0L
+                // Track 2 typically uses 2 ATC digits
+                val track2UnSize = calculateUnSize(bitmapValue, 2)
+                
+                params["track2_un_atc_bitmap"] = track2UnAtcBitmap
+                params["track2_un_size"] = track2UnSize
+                
+                if (track2Cvc3Bitmap != null) {
+                    params["track2_cvc3_bitmap"] = track2Cvc3Bitmap
+                }
+                
+                Timber.i("💳 Track 2 iCVV params: bitmap=$track2UnAtcBitmap, unSize=$track2UnSize bytes")
+            }
+            
+            // Extract other iCVV-related tags
+            val atc = parsedEmvFields["9F36"] // Application Transaction Counter
+            val un = parsedEmvFields["9F37"] // Unpredictable Number
+            
+            if (atc != null) params["atc"] = atc
+            if (un != null) params["unpredictable_number"] = un
+            
+            // Calculate iCVV status
+            val hasIcvvData = track1Bitmap != null || track2UnAtcBitmap != null
+            params["icvv_capable"] = hasIcvvData
+            
+            if (hasIcvvData) {
+                params["icvv_status"] = "Card supports dynamic CVV (iCVV/CVC3)"
+                Timber.i("✅ Card supports iCVV/Dynamic CVV generation")
+            } else {
+                params["icvv_status"] = "No iCVV bitmaps found (static CVV only)"
+                Timber.d("ℹ️ Card uses static CVV (no dynamic CVV tags)")
+            }
+            
+        } catch (e: Exception) {
+            Timber.e(e, "Error calculating iCVV/Dynamic CVV parameters")
+            params["icvv_error"] = e.message ?: "Unknown error"
+        }
+        
+        return params.toMap()
+    }
+    
+    /**
+     * Format iCVV parameters for storage/display
+     */
+    private fun formatIcvvParams(params: Map<String, Any>): String {
+        val sb = StringBuilder()
+        
+        params.forEach { (key, value) ->
+            sb.append("$key: $value\\n")
+        }
+        
+        return sb.toString().trim()
+    }
+    
+    /**
+     * Extract ROCA vulnerability analysis details for storage
+     */
+    private fun extractRocaAnalysisDetails(): String {
+        val sb = StringBuilder()
+        val rocaResults = EmvTlvParser.getRocaAnalysisResults()
+        
+        if (rocaResults.isEmpty()) {
+            return "No certificates analyzed"
+        }
+        
+        rocaResults.forEach { (tagId, result) ->
+            val tagName = EmvTagDictionary.getTagDescription(tagId)
+            sb.append("Tag $tagId ($tagName):\\n")
+            sb.append("  Vulnerable: ${result.isVulnerable}\\n")
+            sb.append("  Confidence: ${result.confidence}\\n")
+            sb.append("  Modulus bits: ${result.modulusBitLength}\\n")
+            
+            if (result.fingerprintMatch != null) {
+                sb.append("  Fingerprint match: ${result.fingerprintMatch}\\n")
+            }
+            
+            if (result.factorAttempt != null) {
+                sb.append("  Factor attempt: ${if (result.factorAttempt.successful) "SUCCESS" else "FAILED"}\\n")
+                if (result.factorAttempt.successful) {
+                    sb.append("  ⚠️ RSA PRIVATE KEY COMPROMISED!\\n")
+                }
+            }
+            
+            sb.append("\\n")
+        }
+        
+        return sb.toString().trim()
     }
     
     /**
@@ -1885,6 +2290,21 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             // EMV Tags Map for additional data
             emvTags = buildRealEmvTagsMap(apduLog, finalPan, extractedAid, extractedTrack2),
 
+            // iCVV/Dynamic CVV calculation
+            icvvCapable = calculateDynamicCvvParams()["icvv_capable"] as? Boolean ?: false,
+            icvvTrack1Bitmap = calculateDynamicCvvParams()["track1_bitmap"] as? String,
+            icvvTrack1AtcDigits = calculateDynamicCvvParams()["track1_atc_digits"] as? Int,
+            icvvTrack1UnSize = calculateDynamicCvvParams()["track1_un_size"] as? Int,
+            icvvTrack2Bitmap = calculateDynamicCvvParams()["track2_un_atc_bitmap"] as? String,
+            icvvTrack2UnSize = calculateDynamicCvvParams()["track2_un_size"] as? Int,
+            icvvStatus = calculateDynamicCvvParams()["icvv_status"] as? String,
+            icvvParameters = formatIcvvParams(calculateDynamicCvvParams()),
+            
+            // ROCA Vulnerability Analysis
+            rocaVulnerable = isRocaVulnerable,
+            rocaVulnerabilityStatus = rocaVulnerabilityStatus,
+            rocaAnalysisDetails = extractRocaAnalysisDetails(),
+            rocaCertificatesAnalyzed = EmvTlvParser.getRocaAnalysisResults().size,
             
             // APDU Log
             apduLog = apduLog,
@@ -2021,6 +2441,19 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Select NFC reader
      */
+    /**
+     * Toggle contact mode (1PAY) vs contactless mode (2PAY)
+     */
+    fun setContactMode(enabled: Boolean) {
+        forceContactMode = enabled
+        statusMessage = if (enabled) {
+            "Contact mode (1PAY) enabled - will use 1PAY.SYS.DDF01"
+        } else {
+            "Contactless mode (2PAY) enabled - will try 2PAY.SYS.DDF01 first"
+        }
+        Timber.i("Contact mode ${if (enabled) "ENABLED" else "DISABLED"}: forceContactMode=$forceContactMode")
+    }
+    
     fun selectReader(reader: ReaderType) {
         viewModelScope.launch {
             try {
