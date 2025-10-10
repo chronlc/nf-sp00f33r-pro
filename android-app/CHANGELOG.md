@@ -13,6 +13,63 @@ All notable changes to nf-sp00f33r EMV Security Research Platform.
 
 ---
 
+## [Phase 3] - 2025-10-10
+
+### 🔐 ROCA Integration + iCVV/Dynamic CVV + Contact Mode (Nightly Release)
+
+**Added:**
+- **ROCA Vulnerability Analysis Integration** (CardReadingViewModel)
+  - Auto-clears ROCA results at workflow start for fresh analysis per scan
+  - `checkRocaVulnerability()` extracts results after each TLV parse phase
+  - 4 new EmvCardData fields: rocaVulnerable, rocaVulnerabilityStatus, rocaAnalysisDetails, rocaCertificatesAnalyzed
+  - Confidence levels: CONFIRMED, HIGHLY_LIKELY, POSSIBLE, UNLIKELY
+  - Real-time vulnerability detection during certificate tag parsing (9F46, 92, 9F32, 9F47)
+
+- **iCVV/Dynamic CVV Calculation** (CardReadingViewModel)
+  - `calculateUnSize()` using Brian Kernighan bit counting algorithm from ChAP.py
+  - `calculateDynamicCvvParams()` extracts Track 1/2 bitmaps (9F63, 9F64, 9F65, 9F66)
+  - 8 new EmvCardData fields: icvvCapable, icvvTrack1Bitmap, icvvTrack1AtcDigits, icvvTrack1UnSize, icvvTrack2Bitmap, icvvTrack2UnSize, icvvStatus, icvvParameters
+  - Automatic UN size calculation for cards with Track bitmap support
+  - Formatted iCVV parameter storage for analysis
+
+- **Contact Mode Toggle** (CardReadingViewModel)
+  - `forceContactMode` flag with `setContactMode()` function
+  - PPSE respects mode: forced 1PAY (contact) or auto 2PAY→1PAY fallback
+  - User-controllable for testing different card interfaces (contactless vs contact)
+  - Automatic fallback when contactless fails
+
+**Enhanced:**
+- **Comprehensive TLV Parsing** (CardReadingViewModel)
+  - `displayParsedData()` uses EmvTlvParser for ALL tags (60-80+ tags vs previous 17)
+  - `parsedEmvFields` state variable accumulates all tags across workflow phases
+  - `buildRealEmvTagsMap()` uses parsedEmvFields instead of hardcoded subset
+  - `extractDetailedEmvData()` uses EmvTlvParser for complete extraction
+  - Template-aware recursive parsing with error/warning reporting
+
+- **CDOL1 Extraction Bug Fixes** (CardReadingViewModel)
+  - Skip READ RECORD responses to avoid RSA certificate false matches
+  - Validate CDOL1 length (must be ≥4 hex chars for valid tag-length pair)
+  - Byte-boundary search with proper length validation
+  - Example: "9F3704" valid, "F6" invalid
+
+**Technical Details:**
+- EmvTlvParser.clearRocaAnalysisResults() called at workflow start
+- checkRocaVulnerability() called after each TLV parse (PPSE, AID, GPO, READ_RECORD, GENERATE AC, GET DATA)
+- extractRocaAnalysisDetails() formats vulnerability info with tag ID, confidence, key size, fingerprint
+- All changes follow Universal Laws (read-map-validate pattern)
+- Thread-safe UI updates with withContext(Dispatchers.Main)
+
+**Commits:**
+- `dc49ad6` - Complete ROCA integration + iCVV/Dynamic CVV + Contact mode toggle + Comprehensive TLV parsing
+- `5fe42a1` - Fix ROCA property references (keySize, fingerprint)
+
+**Build Status:** ✅ BUILD SUCCESSFUL  
+**APK Size:** 74 MB  
+**Files Modified:** 2 (CardReadingViewModel.kt, EmvCardData.kt)  
+**Lines Changed:** +631, -182
+
+---
+
 ## [Phase 3] - 2025-10-09
 
 ### 🎉 UI Automation System Complete (25% → 100%)

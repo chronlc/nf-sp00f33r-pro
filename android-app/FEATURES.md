@@ -8,7 +8,7 @@ Complete feature documentation for nf-sp00f33r EMV Security Research Platform.
 
 ### 1. EMV Card Reading
 
-**Status:** ✅ Production-Ready
+**Status:** ✅ Production-Ready (Updated 2025-10-10)
 
 **Capabilities:**
 - **Full EMV Data Extraction**
@@ -18,6 +18,8 @@ Complete feature documentation for nf-sp00f33r EMV Security Research Platform.
   - Track2 equivalent data
   - ICC public key certificates
   - Application cryptograms
+  - iCVV/Dynamic CVV parameters (Track 1/2 bitmaps, UN sizes)
+  - ROCA vulnerability analysis (auto-detected during scan)
 
 - **Real-time APDU Terminal**
   - 20 commands visible in enhanced terminal
@@ -38,18 +40,37 @@ Complete feature documentation for nf-sp00f33r EMV Security Research Platform.
   - Proxmark3-inspired parsing algorithms
   - Nested structure support
   - EMV-compliant tag handling
+  - Comprehensive extraction: 60-80+ tags per card (vs previous 17)
+  - Automatic storage in card's emvTags map
+
+- **Contact/Contactless Mode**
+  - Automatic 2PAY (contactless) → 1PAY (contact) fallback
+  - Force contact mode option for testing
+  - PPSE selection respects mode configuration
+  - User-controllable via setContactMode()
+
+- **iCVV/Dynamic CVV Analysis**
+  - Brian Kernighan bit counting algorithm for UN size calculation
+  - Track 1/2 bitmap extraction (tags 9F63, 9F64, 9F65, 9F66)
+  - Automatic UN size calculation for Track 1 and Track 2
+  - Formatted parameter storage for analysis
+  - Detection of dynamic CVV capability
 
 ---
 
 ### 2. ROCA Vulnerability Detection
 
-**Status:** ✅ Production-Ready
+**Status:** ✅ Production-Ready (Updated 2025-10-10)
 
 **Capabilities:**
 - **Automatic Scanning**
-  - Triggered after every card scan
+  - Integrated into card reading workflow (real-time detection)
+  - Auto-clears previous results at workflow start
+  - Triggered during certificate tag parsing (9F46, 92, 9F32, 9F47)
+  - Results extracted after each TLV parse phase
   - Batch scanning for all stored cards
   - Color-coded alerts (🔴 vulnerable / 🟢 safe)
+  - 4 new card fields: rocaVulnerable, rocaVulnerabilityStatus, rocaAnalysisDetails, rocaCertificatesAnalyzed
 
 - **Fingerprint Testing**
   - 167 prime divisibility checks

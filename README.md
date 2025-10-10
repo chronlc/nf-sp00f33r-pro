@@ -34,7 +34,10 @@ This repository contains a single module:
 - Application File Locator (AFL) parsing for record extraction
 - Application Interchange Profile (AIP) analysis (SDA/DDA/CDA detection)
 - Track 2 Equivalent Data extraction and manipulation
-- RSA public key certificate analysis for ROCA vulnerability assessment
+- RSA public key certificate analysis for ROCA vulnerability assessment (integrated workflow)
+- iCVV/Dynamic CVV analysis with Track bitmap processing (Brian Kernighan algorithm)
+- Contact/Contactless mode toggle (1PAY/2PAY) with automatic fallback
+- Comprehensive TLV parsing: 60-80+ tags per card (EmvTlvParser)
 
 ## Build Instructions
 
