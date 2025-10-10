@@ -27,6 +27,7 @@ import com.nfsp00f33r.app.components.VirtualCardView
 import com.nfsp00f33r.app.ui.components.RocaVulnerabilityCard
 import com.nfsp00f33r.app.ui.components.RocaVulnerabilityBadge
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
+import com.nfsp00f33r.app.cardreading.EmvTagDictionary
 
 /**
  * SLEEK DATA-FOCUSED EMV Card Reading Screen
@@ -513,7 +514,7 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(250.dp)
+                    .height(300.dp)
                     .background(
                         Color(0xFF000000),
                         RoundedCornerShape(8.dp)
@@ -537,79 +538,226 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                         reverseLayout = true
                     ) {
-                        items(viewModel.apduLog.takeLast(20)) { apduEntry ->
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                // TX (Transmit) - Command in GREEN
-                                Row(verticalAlignment = Alignment.Top) {
-                                    Text(
-                                        "TX>",
-                                        color = Color(0xFF00FF41),
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                            fontWeight = FontWeight.Bold
-                                        ),
-                                        modifier = Modifier.width(35.dp)
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            apduEntry.command,
-                                            color = Color(0xFF00FF41),
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                                            )
-                                        )
-                                        Text(
-                                            apduEntry.description,
-                                            color = Color(0xFF666666),
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontSize = 10.sp
-                                            )
-                                        )
-                                    }
-                                }
-                                
-                                // RX (Receive) - Response in BLUE
-                                Row(verticalAlignment = Alignment.Top) {
-                                    Text(
-                                        "RX<",
-                                        color = Color(0xFF2196F3),
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                            fontWeight = FontWeight.Bold
-                                        ),
-                                        modifier = Modifier.width(35.dp)
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            "${apduEntry.response} [${apduEntry.statusWord}]",
-                                            color = Color(0xFF2196F3),
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                                            )
-                                        )
-                                        Text(
-                                            "${apduEntry.executionTimeMs}ms",
-                                            color = Color(0xFF666666),
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontSize = 10.sp
-                                            )
-                                        )
-                                    }
-                                }
-                                
-                                Spacer(modifier = Modifier.height(4.dp))
-                            }
+                        items(viewModel.apduLog.takeLast(15)) { apduEntry ->
+                            ApduLogItemParsed(apduEntry)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        // TX (Transmit) - Command in GREEN
+        Row(verticalAlignment = Alignment.Top) {
+            Text(
+                "TX>",
+                color = Color(0xFF00FF41),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                ),
+                modifier = Modifier.width(35.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    apduEntry.command,
+                    color = Color(0xFF00FF41),
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                )
+                // Enhanced description with parsed command details
+                val enhancedDesc = EmvTagDictionary.enhanceApduDescription(
+                    apduEntry.command,
+                    apduEntry.response,
+                    apduEntry.description
+                )
+                Text(
+                    enhancedDesc,
+                    color = Color(0xFF888888),
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 10.sp
+                    )
+                )
+            }
+        }
+        
+        // RX (Receive) - Response in BLUE with status word decoding
+        Row(verticalAlignment = Alignment.Top) {
+            Text(
+                "RX<",
+                color = Color(0xFF2196F3),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                ),
+                modifier = Modifier.width(35.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (apduEntry.response.length > 40) 
+                            "${apduEntry.response.take(40)}..." 
+                        else 
+                            apduEntry.response,
+                        color = Color(0xFF2196F3),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    // Status Word with color coding
+                    val (swColor, swDesc) = decodeStatusWord(apduEntry.statusWord)
+                    Surface(
+                        color = swColor.copy(alpha = 0.2f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            apduEntry.statusWord,
+                            color = swColor,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp
+                            ),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        decodeStatusWord(apduEntry.statusWord).second,
+                        color = Color(0xFF666666),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 9.sp
+                        )
+                    )
+                    Text(
+                        "⏱ ${apduEntry.executionTimeMs}ms",
+                        color = Color(0xFF666666),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 9.sp
+                        )
+                    )
+                }
+            }
+        }
+        
+        // Parse response for EMV tags if data length > 0
+        if (apduEntry.response.length > 4 && apduEntry.statusWord == "9000") {
+            val parsedTags = parseApduResponseTags(apduEntry.response)
+            if (parsedTags.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.padding(start = 35.dp, top = 2.dp)
+                ) {
+                    Column {
+                        parsedTags.take(3).forEach { (tag, desc) ->
+                            Text(
+                                "  ├─ $tag: $desc",
+                                color = Color(0xFFFFB74D),
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontSize = 9.sp
+                                )
+                            )
+                        }
+                        if (parsedTags.size > 3) {
+                            Text(
+                                "  └─ +${parsedTags.size - 3} more tags",
+                                color = Color(0xFF666666),
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontSize = 9.sp
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(6.dp))
+    }
+}
+
+/**
+ * Decode ISO 7816-4 status words with color coding
+ */
+private fun decodeStatusWord(sw: String): Pair<Color, String> {
+    return when (sw.uppercase()) {
+        "9000" -> Pair(Color(0xFF4CAF50), "Success")
+        "6100" -> Pair(Color(0xFF2196F3), "More data available")
+        "6283" -> Pair(Color(0xFFFF9800), "File invalidated")
+        "6284" -> Pair(Color(0xFFFF9800), "Selected file in termination state")
+        "6300" -> Pair(Color(0xFFFF9800), "Authentication failed")
+        "6400" -> Pair(Color(0xFFF44336), "State memory unchanged")
+        "6581" -> Pair(Color(0xFFF44336), "Memory failure")
+        "6700" -> Pair(Color(0xFFF44336), "Wrong length")
+        "6800" -> Pair(Color(0xFFF44336), "Functions not supported")
+        "6900" -> Pair(Color(0xFFF44336), "Command not allowed")
+        "6982" -> Pair(Color(0xFFF44336), "Security status not satisfied")
+        "6983" -> Pair(Color(0xFFF44336), "Authentication method blocked")
+        "6985" -> Pair(Color(0xFFF44336), "No current EF selected")
+        "6986" -> Pair(Color(0xFFF44336), "No PIN defined")
+        "6A80" -> Pair(Color(0xFFF44336), "Incorrect parameters")
+        "6A81" -> Pair(Color(0xFFF44336), "Function not supported")
+        "6A82" -> Pair(Color(0xFFF44336), "File not found")
+        "6A83" -> Pair(Color(0xFFF44336), "Record not found")
+        "6A84" -> Pair(Color(0xFFF44336), "Not enough memory")
+        "6A86" -> Pair(Color(0xFFF44336), "Incorrect P1/P2")
+        "6A88" -> Pair(Color(0xFFF44336), "Referenced data not found")
+        "6B00" -> Pair(Color(0xFFF44336), "Wrong parameters P1-P2")
+        "6C00" -> Pair(Color(0xFFF44336), "Wrong length Le")
+        "6D00" -> Pair(Color(0xFFF44336), "Instruction not supported")
+        "6E00" -> Pair(Color(0xFFF44336), "Class not supported")
+        "6F00" -> Pair(Color(0xFFF44336), "Unknown error")
+        else -> {
+            if (sw.startsWith("61")) {
+                Pair(Color(0xFF2196F3), "${sw.substring(2).toIntOrNull(16) ?: 0} bytes available")
+            } else if (sw.startsWith("6C")) {
+                Pair(Color(0xFFFF9800), "Wrong length, correct: ${sw.substring(2)}")
+            } else {
+                Pair(Color(0xFF888888), "Unknown status")
+            }
+        }
+    }
+}
+
+/**
+ * Parse APDU response for EMV tags using existing EmvTlvParser
+ */
+private fun parseApduResponseTags(response: String): List<Pair<String, String>> {
+    if (response.length < 4) return emptyList()
+    
+    try {
+        val responseBytes = response.chunked(2)
+            .mapNotNull { it.toIntOrNull(16)?.toByte() }
+            .toByteArray()
+        
+        val parseResult = EmvTlvParser.parseEmvTlvData(responseBytes, "APDU", validateTags = true)
+        
+        return parseResult.tags.map { (tag, value) ->
+            val description = EmvTagDictionary.getTagDescription(tag)
+            Pair(tag, description)
+        }
+    } catch (e: Exception) {
+        return emptyList()
     }
 }
 

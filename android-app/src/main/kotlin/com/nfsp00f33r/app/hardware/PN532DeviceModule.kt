@@ -76,7 +76,22 @@ class PN532DeviceModule(
         successfulConnections = 0
         failedConnections = 0
         
-        getLogger().info("PN532Device module initialized (device not connected yet)")
+        getLogger().info("PN532Device module initialized successfully")
+        
+        // Auto-connect to PN532 Bluetooth (in background)
+        withContext(Dispatchers.IO) {
+            try {
+                getLogger().info("Attempting PN532 Bluetooth auto-connection...")
+                connectionAttempts++
+                manager.connect(PN532Manager.ConnectionType.BLUETOOTH_HC06)
+                successfulConnections++
+                getLogger().info("PN532 Bluetooth auto-connection successful")
+            } catch (e: Exception) {
+                failedConnections++
+                getLogger().warn("PN532 Bluetooth auto-connection failed: ${e.message}")
+                // Don't throw - module initialization should succeed even if connection fails
+            }
+        }
     }
     
     /**
