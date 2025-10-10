@@ -1823,15 +1823,38 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private fun buildRealEmvTagsMap(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>, pan: String, aid: String, track2: String): Map<String, String> {
         val tags = mutableMapOf<String, String>()
         
-        // Use ALL tags from comprehensive TLV parser (parsedEmvFields)
-        tags.putAll(parsedEmvFields)
+        // Parse ALL APDU responses (except PPSE) and collect ALL tags
+        apduLog.forEach { apdu ->
+            // Skip PPSE responses - we only want selected AID data
+            if (apdu.description.contains("PPSE", ignoreCase = true)) {
+                return@forEach
+            }
+            
+            // Convert hex string to ByteArray and parse
+            try {
+                val responseBytes = apdu.response.chunked(2)
+                    .map { it.toInt(16).toByte() }
+                    .toByteArray()
+                
+                val parseResult = EmvTlvParser.parseEmvTlvData(
+                    data = responseBytes,
+                    context = apdu.description,
+                    validateTags = true
+                )
+                
+                // Add all found tags to the map (later entries overwrite earlier ones)
+                tags.putAll(parseResult.tags)
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to parse APDU: ${apdu.description}")
+            }
+        }
         
-        // Ensure critical tags are present
+        // Ensure critical tags are present with extracted values
         if (pan.isNotEmpty()) tags["5A"] = pan
         if (aid.isNotEmpty()) tags["4F"] = aid  
         if (track2.isNotEmpty()) tags["57"] = track2
         
-        Timber.i("📦 Built EMV tags map: ${tags.size} total tags from comprehensive parsing")
+        Timber.i("📦 Built EMV tags map: ${tags.size} total tags from parsing ${apduLog.size} APDUs")
         
         return tags.toMap()
     }
