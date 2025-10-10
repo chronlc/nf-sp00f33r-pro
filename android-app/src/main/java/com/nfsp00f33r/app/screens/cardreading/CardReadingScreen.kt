@@ -978,9 +978,20 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
 
 /**
  * Individual EMV field row display
+ * Format: TAG# - Tag Name
  */
 @Composable
 private fun EmvFieldRow(key: String, value: String) {
+    // Format tag display as "TAG# - Tag Name"
+    val displayKey = if (key.matches(Regex("^[0-9A-F]+$"))) {
+        // It's a hex tag, get description from dictionary
+        val tagName = EmvTagDictionary.getTagDescription(key)
+        "$key - $tagName"
+    } else {
+        // It's already a friendly name
+        key.uppercase().replace("_", " ")
+    }
+    
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -988,12 +999,12 @@ private fun EmvFieldRow(key: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
-            text = key.uppercase().replace("_", " "),
+            text = displayKey,
             style = MaterialTheme.typography.bodySmall.copy(
                 color = Color(0xFF888888),
                 fontWeight = FontWeight.Medium
             ),
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1.5f)
         )
         
         Text(
