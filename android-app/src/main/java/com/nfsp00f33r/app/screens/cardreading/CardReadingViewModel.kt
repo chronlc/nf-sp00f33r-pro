@@ -2192,10 +2192,10 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             sb.append("Tag $tagId ($tagName):\\n")
             sb.append("  Vulnerable: ${result.isVulnerable}\\n")
             sb.append("  Confidence: ${result.confidence}\\n")
-            sb.append("  Modulus bits: ${result.modulusBitLength}\\n")
+            sb.append("  Key size: ${result.keySize ?: "unknown"} bits\\n")
             
-            if (result.fingerprintMatch != null) {
-                sb.append("  Fingerprint match: ${result.fingerprintMatch}\\n")
+            if (result.fingerprint != null) {
+                sb.append("  Fingerprint: ${result.fingerprint}\\n")
             }
             
             if (result.factorAttempt != null) {
