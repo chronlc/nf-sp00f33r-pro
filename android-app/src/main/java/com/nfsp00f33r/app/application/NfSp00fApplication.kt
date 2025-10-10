@@ -79,12 +79,12 @@ class NfSp00fApplication : Application() {
     private suspend fun initializeSecurityProvider() {
         try {
             reportProgress("Initializing security provider...", 0.05f)
-            delay(600L)
+            delay(150L)
             // Insert BouncyCastle as the first security provider
             Security.insertProviderAt(BouncyCastleProvider(), 1)
             Log.i(TAG, "BouncyCastle security provider initialized successfully")
             reportProgress("Security provider ready", 0.10f)
-            delay(600L)
+            delay(150L)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize BouncyCastle provider", e)
             reportProgress("Security init failed", 0.10f, e.message)
@@ -99,11 +99,11 @@ class NfSp00fApplication : Application() {
         try {
             Log.i(TAG, "Initializing module system...")
             reportProgress("Starting module system...", 0.15f)
-                delay(600L)
+                delay(150L)
                 
                 // Initialize password manager first
                 reportProgress("Setting up password manager...", 0.20f)
-                delay(600L)
+                delay(150L)
                 passwordManager = com.nfsp00f33r.app.storage.SecureMasterPasswordManager(applicationContext)
                 
                 // Get master password
@@ -117,18 +117,18 @@ class NfSp00fApplication : Application() {
                 if (masterPassword == null) {
                     Log.e(TAG, "Failed to retrieve master password - module initialization aborted")
                     reportProgress("Password init failed", 0.20f, "Master password unavailable")
-                    delay(600L)
+                    delay(150L)
                     return
                 }
                 
                 // Initialize ModuleRegistry
                 reportProgress("Initializing module registry...", 0.25f)
-                delay(600L)
+                delay(150L)
                 ModuleRegistry.initialize()
                 
                 // Create and register LoggingModule (Phase 2A Day 7)
                 reportProgress("Registering Logging module...", 0.30f)
-                delay(600L)
+                delay(150L)
                 val loggingModule = com.nfsp00f33r.app.core.LoggingModule(
                     minLogLevel = com.nfsp00f33r.app.core.LoggingModule.LogLevel.DEBUG,
                     enableFileLogging = false
@@ -137,7 +137,7 @@ class NfSp00fApplication : Application() {
                 
                 // Create and register SecureMasterPasswordModule (Phase 2B Day 2)
                 reportProgress("Registering Password module...", 0.38f)
-                delay(600L)
+                delay(150L)
                 val passwordModule = com.nfsp00f33r.app.storage.SecureMasterPasswordModule(
                     context = applicationContext
                 )
@@ -145,7 +145,7 @@ class NfSp00fApplication : Application() {
                 
                 // Create and register CardDataStoreModule
                 reportProgress("Registering CardData module...", 0.46f)
-                delay(600L)
+                delay(150L)
                 val cardDataStoreModule = CardDataStoreModule(
                     context = applicationContext,
                     encryptionEnabled = true,
@@ -155,7 +155,7 @@ class NfSp00fApplication : Application() {
                 
                 // Create and register PN532DeviceModule (Phase 2B Day 1)
                 reportProgress("Registering PN532 module...", 0.54f)
-                delay(600L)
+                delay(150L)
                 val pn532DeviceModule = com.nfsp00f33r.app.hardware.PN532DeviceModule(
                     context = applicationContext
                 )
@@ -163,7 +163,7 @@ class NfSp00fApplication : Application() {
                 
                 // Create and register NfcHceModule (Phase 2B Days 3-4)
                 reportProgress("Registering NFC/HCE module...", 0.62f)
-                delay(600L)
+                delay(150L)
                 val nfcHceModule = com.nfsp00f33r.app.nfc.NfcHceModule(
                     context = applicationContext
                 )
@@ -171,7 +171,7 @@ class NfSp00fApplication : Application() {
                 
                 // Create and register EmulationModule (Phase 2B Days 5-6)
                 reportProgress("Registering Emulation module...", 0.70f)
-                delay(600L)
+                delay(150L)
                 val emulationModule = com.nfsp00f33r.app.emulation.EmulationModule(
                     context = applicationContext
                 )
@@ -179,7 +179,7 @@ class NfSp00fApplication : Application() {
                 
                 // Start all modules
                 reportProgress("Starting all modules...", 0.78f)
-                delay(600L)
+                delay(150L)
                 val results = ModuleRegistry.startAll()
                 
                 // Log initialization results
@@ -211,12 +211,12 @@ class NfSp00fApplication : Application() {
                 
                 Log.i(TAG, "Module system initialized successfully")
                 reportProgress("All modules ready", 0.95f)
-                delay(600L)
+                delay(150L)
                 
                 // Mark initialization as complete
                 isInitialized = true
                 reportProgress("Initialization complete!", 1.0f)
-                delay(600L)
+                delay(150L)
                 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize module system", e)
