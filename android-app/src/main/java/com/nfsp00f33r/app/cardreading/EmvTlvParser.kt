@@ -95,6 +95,7 @@ object EmvTlvParser {
     
     /**
      * Recursive TLV parser with depth control and validation
+     * FIXED: Properly distinguishes template tags (contain nested tags) from regular data tags
      */
     private fun parseTlvRecursive(
         data: ByteArray,
@@ -170,6 +171,9 @@ object EmvTlvParser {
                 }
                 
                 val isKnownTag = validateTags && EmvTagDictionary.EMV_TAGS.containsKey(tagHex)
+                
+                // CRITICAL FIX: Template detection using constructed bit and known template tags
+                // Template tags have CONSTRUCTED bit set (bit 6 of first tag byte = 1)
                 val isTemplate = isTemplateTag(tagHex, tagBytes[0])
                 
                 if (validateTags && !isKnownTag && !tagHex.startsWith("DF") && !tagHex.startsWith("FF")) {
@@ -179,9 +183,17 @@ object EmvTlvParser {
                     validCount++
                 }
                 
-                if (isTemplate && length > 0) {
-                    // Parse nested template
-                    Timber.d("$TAG $indent🔧 $context: $tagHex ($tagDescription) - TEMPLATE (${length} bytes)")
+                // CRITICAL: Check if this is actually a template based on data structure
+                val looksLikeTemplate = if (length > 0 && isTemplate) {
+                    // Verify if data contains valid TLV structure (peek at first byte)
+                    val nextByte = data[offset].toInt() and 0xFF
+                    // Valid tag byte: bit 8 is NOT 0 (all 0 is invalid)
+                    nextByte != 0 && (nextByte and 0xE0) != 0
+                } else false
+                
+                if (looksLikeTemplate && length > 0) {
+                    // Parse nested template (contains other TLV tags)
+                    Timber.d("$TAG $indent🔧 $context: $tagHex ($tagDescription) - TEMPLATE [${length} bytes, contains nested tags]")
                     
                     val nestedResult = parseTlvRecursive(
                         data, offset, offset + length, tags, 
@@ -194,12 +206,12 @@ object EmvTlvParser {
                     maxDepth = maxOf(maxDepth, nestedResult.third)
                     
                 } else if (length > 0) {
-                    // Extract primitive value
+                    // Extract primitive value (regular data tag)
                     val value = data.copyOfRange(offset, offset + length)
                     val valueHex = bytesToHex(value)
                     
                     tags[tagHex] = valueHex
-                    Timber.d("$TAG $indent🏷️ $context: $tagHex ($tagDescription) = $valueHex")
+                    Timber.d("$TAG $indent🏷️ $context: $tagHex ($tagDescription) - DATA [${length} bytes] = ${valueHex.take(32)}${if (valueHex.length > 32) "..." else ""}")
                     
                     // Log critical tags specifically
                     if (EmvTagDictionary.isCriticalTag(tagHex)) {

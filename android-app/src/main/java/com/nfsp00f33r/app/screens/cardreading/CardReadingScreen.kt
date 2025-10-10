@@ -28,6 +28,7 @@ import com.nfsp00f33r.app.ui.components.RocaVulnerabilityCard
 import com.nfsp00f33r.app.ui.components.RocaVulnerabilityBadge
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
 import com.nfsp00f33r.app.cardreading.EmvTagDictionary
+import kotlinx.coroutines.delay
 
 /**
  * SLEEK DATA-FOCUSED EMV Card Reading Screen
@@ -36,45 +37,69 @@ import com.nfsp00f33r.app.cardreading.EmvTagDictionary
 @Composable
 fun CardReadingScreen() {
     val context = LocalContext.current
-    val viewModel: CardReadingViewModel = viewModel(
-        factory = CardReadingViewModel.Factory(context)
-    )
+    
+    // Defer ViewModel creation to avoid blocking main thread during navigation
+    val viewModel: CardReadingViewModel = remember {
+        CardReadingViewModel.Factory(context).create(CardReadingViewModel::class.java)
+    }
+    
+    // Defer heavy UI rendering until after first frame
+    var isInitialized by remember { mutableStateOf(false) }
+    
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(50) // Let initial frame render first
+        isInitialized = true
+    }
     
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0A0A0A))
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(12.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Data-focused status header
-            StatusHeaderCard(viewModel)
-            
-            // Compact control panel
-            ControlPanelCard(viewModel)
-            
-            // ROCA Vulnerability Status
-            if (viewModel.rocaVulnerabilityStatus != null) {
-                RocaVulnerabilityStatusCard(viewModel)
+        if (!isInitialized) {
+            // Fast loading state
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "Loading...",
+                    color = Color(0xFF00FF41),
+                    fontSize = 16.sp
+                )
             }
-            
-            // Large data display area
-            if (viewModel.scannedCards.isNotEmpty()) {
-                ActiveCardsSection(viewModel)
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Data-focused status header
+                StatusHeaderCard(viewModel)
+                
+                // Compact control panel
+                ControlPanelCard(viewModel)
+                
+                // ROCA Vulnerability Status
+                if (viewModel.rocaVulnerabilityStatus != null) {
+                    RocaVulnerabilityStatusCard(viewModel)
+                }
+                
+                // Large data display area
+                if (viewModel.scannedCards.isNotEmpty()) {
+                    ActiveCardsSection(viewModel)
+                }
+                
+                // Real-time EMV data display
+                if (viewModel.parsedEmvFields.isNotEmpty()) {
+                    EmvDataDisplaySection(viewModel)
+                }
+                
+                // Terminal-style APDU log
+                ApduTerminalSection(viewModel)
             }
-            
-            // Real-time EMV data display
-            if (viewModel.parsedEmvFields.isNotEmpty()) {
-                EmvDataDisplaySection(viewModel)
-            }
-            
-            // Terminal-style APDU log
-            ApduTerminalSection(viewModel)
         }
     }
 }
