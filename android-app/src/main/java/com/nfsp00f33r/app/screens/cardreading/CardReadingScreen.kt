@@ -503,11 +503,47 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                     color = Color(0xFF00FF41)
                 )
                 
-                Text(
-                    "${viewModel.apduLog.size} cmds",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF666666)
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "${viewModel.apduLog.size} cmds",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF666666)
+                    )
+                    
+                    if (viewModel.apduLog.isNotEmpty()) {
+                        androidx.compose.material3.Button(
+                            onClick = {
+                                // Print full APDU log to logcat
+                                android.util.Log.i("APDU_DUMP", "=".repeat(80))
+                                android.util.Log.i("APDU_DUMP", "FULL APDU LOG - ${viewModel.apduLog.size} commands")
+                                android.util.Log.i("APDU_DUMP", "=".repeat(80))
+                                viewModel.apduLog.forEachIndexed { index, entry ->
+                                    android.util.Log.i("APDU_DUMP", "")
+                                    android.util.Log.i("APDU_DUMP", "[$index] ${entry.description}")
+                                    android.util.Log.i("APDU_DUMP", "  TX: ${entry.command}")
+                                    android.util.Log.i("APDU_DUMP", "  RX: ${entry.response}")
+                                    android.util.Log.i("APDU_DUMP", "  SW: ${entry.statusWord}")
+                                }
+                                android.util.Log.i("APDU_DUMP", "=".repeat(80))
+                            },
+                            modifier = Modifier.height(24.dp),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1A1A1A)
+                            ),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                "DUMP",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF00FF41),
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
             }
             
             // Large Terminal Window
