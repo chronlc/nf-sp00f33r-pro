@@ -936,7 +936,10 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         // Auto-save to database
         delay(1000)
         saveCardProfile(extractedData)
+        
+        // Load saved data from database to display (fixes tag display issues)
         withContext(Dispatchers.Main) {
+            parsedEmvFields = extractedData.emvTags
             statusMessage = "Card saved to database - Ready for next scan"
             scanState = ScanState.IDLE
         }
@@ -1885,13 +1888,10 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             var parsedInfo = "📋 $phase Parsed Data:\n"
             
             if (parseResult.tags.isNotEmpty()) {
-                // CORRECT APPROACH: Only store data from the SELECTED AID
-                // PPSE response contains directory info (multiple AIDs) - we don't want that in final data
-                // Only the selected AID's data (SELECT AID, GPO, Records, GET DATA) should be stored
-                // This ensures we show data for the ONE AID we actually selected and processed
-                if (phase !in listOf("PPSE", "PPSE (1PAY)", "PPSE (2PAY)")) {
-                    parsedEmvFields = parsedEmvFields + parseResult.tags
-                }
+                // NOTE: We no longer populate parsedEmvFields during live read
+                // Instead, we load data from database after save (see saveCardProfile)
+                // This is faster and shows correct data with proper tag mappings from emvTags
+                // Live parsing is still logged to APDU log for debugging
                 
                 // Display summary of parsed tags
                 parsedInfo += "  ✅ Total: ${parseResult.tags.size} tags extracted\n"
