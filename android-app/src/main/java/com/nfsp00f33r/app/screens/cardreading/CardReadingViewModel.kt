@@ -364,17 +364,26 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             
             // Extract PDOL from AID selection response
             val pdolData = extractPdolFromAllResponses(apduLog)
+            Timber.i("=== PDOL EXTRACTION ===")
+            Timber.i("PDOL raw data: $pdolData")
+            
             val gpoData = if (pdolData.isNotEmpty()) {
                 // Parse PDOL and build dynamic data
                 val dolEntries = EmvTlvParser.parseDol(pdolData)
-                Timber.d("PDOL contains ${dolEntries.size} entries")
+                Timber.i("PDOL parsed ${dolEntries.size} entries:")
+                dolEntries.forEach { entry ->
+                    Timber.i("  Tag ${entry.tag} (${entry.tagName}): expects ${entry.length} bytes")
+                }
                 buildPdolData(dolEntries)
             } else {
                 // No PDOL - use empty data
+                Timber.w("No PDOL found - using empty data")
                 byteArrayOf(0x83.toByte(), 0x00)
             }
             
-            val gpoCommand = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, gpoData.size.toByte()) + gpoData
+            Timber.i("GPO data to send: ${gpoData.joinToString("") { "%02X".format(it) }} (${gpoData.size} bytes)")
+            val gpoCommand = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, gpoData.size.toByte()) + gpoData + byteArrayOf(0x00)
+            Timber.i("Full GPO command: ${gpoCommand.joinToString("") { "%02X".format(it) }}")
             val gpoResponse = if (isoDep != null) isoDep.transceive(gpoCommand) else null
             
             if (gpoResponse != null) {
