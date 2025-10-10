@@ -597,6 +597,57 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 statusMessage = "Records complete: $recordsRead read, PAN ${if (panFound) "found" else "not found"}"
             }
             
+            // Phase 4B: Try additional common record locations for more EMV data
+            withContext(Dispatchers.Main) {
+                currentPhase = "Additional Records"
+                progress = 0.7f
+                statusMessage = "Scanning for additional EMV data..."
+            }
+            
+            // Try common record locations that might contain additional data
+            val additionalRecords = listOf(
+                Triple(1, 1, 0x0C), Triple(1, 2, 0x0C), Triple(1, 3, 0x0C), Triple(1, 4, 0x0C), Triple(1, 5, 0x0C),
+                Triple(2, 1, 0x14), Triple(2, 2, 0x14), Triple(2, 3, 0x14),
+                Triple(3, 1, 0x1C), Triple(3, 2, 0x1C)
+            )
+            
+            var additionalRecordsRead = 0
+            for ((sfi, record, p2) in additionalRecords) {
+                // Skip if we already read this record from AFL
+                if (recordsToRead.any { it.first == sfi && it.second == record }) {
+                    continue
+                }
+                
+                val readCommand = byteArrayOf(0x00, 0xB2.toByte(), record.toByte(), p2.toByte(), 0x00)
+                val readResponse = if (isoDep != null) isoDep.transceive(readCommand) else null
+                
+                if (readResponse != null) {
+                    val readHex = readResponse.joinToString("") { "%02X".format(it) }
+                    val realStatusWord = if (readHex.length >= 4) readHex.takeLast(4) else "UNKNOWN"
+                    
+                    if (realStatusWord == "9000") {
+                        additionalRecordsRead++
+                        addApduLogEntry(
+                            "00B2" + String.format("%02X%02X", record, p2) + "00",
+                            readHex,
+                            realStatusWord,
+                            "READ RECORD SFI $sfi Rec $record (extra)",
+                            0L
+                        )
+                        displayParsedData("SFI${sfi}_REC${record}_EXTRA", readHex)
+                        
+                        val detailedData = extractDetailedEmvData(readHex)
+                        parsedEmvFields = parsedEmvFields + detailedData
+                        
+                        Timber.i("Found additional record SFI $sfi Rec $record with ${detailedData.size} tags")
+                    }
+                }
+            }
+            
+            withContext(Dispatchers.Main) {
+                statusMessage = "Additional scan: $additionalRecordsRead extra records found"
+            }
+            
             // Phase 5: GET DATA for specific EMV tags (PROXMARK3 style)
             withContext(Dispatchers.Main) {
                 currentPhase = "GET DATA"
@@ -910,13 +961,13 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 }
                 "9F66" -> {
                     // Terminal Transaction Qualifiers (TTQ) - 4 bytes
-                    // Typical contactless MSD/qVSDC support
+                    // Request maximum EMV data including all records and tags
                     ByteArray(entry.length) { i ->
                         when (i) {
-                            0 -> 0x36.toByte() // MSD supported, qVSDC supported, online PIN supported
-                            1 -> 0x00
-                            2 -> 0xC0.toByte() // CVM required
-                            3 -> 0x00
+                            0 -> 0xF6.toByte() // MSD, qVSDC, EMV contact chip, Online PIN, Signature, ODA for Online Auth, CDA, Issuer Update Processing
+                            1 -> 0x20.toByte() // EMV mode supported
+                            2 -> 0xC0.toByte() // CVM required, Online PIN required
+                            3 -> 0x80.toByte() // Issuer script processing supported
                             else -> 0x00
                         }
                     }
