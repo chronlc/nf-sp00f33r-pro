@@ -132,9 +132,18 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     
     init {
         Timber.i("CardReadingViewModel initializing with Proxmark3 EMV workflow")
-        initializeHardwareDetection()
-        setupCardProfileListener()
-        startNfcMonitoring()
+        
+        // Defer heavy initialization to avoid blocking UI during navigation
+        viewModelScope.launch {
+            try {
+                // These operations can be slow and should not block UI creation
+                initializeHardwareDetection()
+                setupCardProfileListener()
+                startNfcMonitoring()
+            } catch (e: Exception) {
+                Timber.e(e, "Error during ViewModel initialization")
+            }
+        }
     }
     
     /**
@@ -2399,6 +2408,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     
     /**
      * Detect available NFC readers
+     * OPTIMIZED: No longer tests connections during initialization to avoid 5+ second lag
      */
     private fun detectAvailableReaders() {
         val readers = mutableListOf<ReaderType>()
@@ -2406,36 +2416,22 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         // Always add Android NFC (may not be functional but present)
         readers.add(ReaderType.ANDROID_NFC)
         
-        // Check for PN532 hardware - Phase 2B Day 1: Use PN532DeviceModule
-        try {
-            // Use module instead of direct PN532Manager instantiation
-            val pn532 = pn532Module
-            
-            // Test Bluetooth connection
-            if (testPN532Connection(pn532, PN532Manager.ConnectionType.BLUETOOTH_HC06)) {
-                readers.add(ReaderType.PN532_BLUETOOTH)
-            }
-            
-            // Test USB connection
-            if (testPN532Connection(pn532, PN532Manager.ConnectionType.USB_SERIAL)) {
-                readers.add(ReaderType.PN532_USB)
-            }
-            
-        } catch (e: Exception) {
-            Timber.w(e, "PN532 detection failed")
-        }
+        // Add PN532 options without testing connections (testing happens when user selects reader)
+        // This avoids the 5+ second Bluetooth connection test that was blocking UI
+        readers.add(ReaderType.PN532_BLUETOOTH)
+        readers.add(ReaderType.PN532_USB)
         
         // Add mock reader for testing
         readers.add(ReaderType.MOCK_READER)
         
         availableReaders = readers
         
-        // Auto-select first available reader
+        // Auto-select Android NFC as default (fast, no connection test needed)
         if (readers.isNotEmpty() && selectedReader == null) {
-            selectReader(readers.first())
+            selectReader(ReaderType.ANDROID_NFC)
         }
         
-        Timber.d("Available readers: ${readers.joinToString()}")
+        Timber.d("Available readers: ${readers.joinToString()} (connection testing deferred to selection time)")
     }
     
     /**

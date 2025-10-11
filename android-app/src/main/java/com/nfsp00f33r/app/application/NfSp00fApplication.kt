@@ -254,8 +254,10 @@ class NfSp00fApplication : Application() {
     }
 
     private fun initializeLogging() {
-        // Configure logging for debug/release builds
-        // This could integrate with Timber or other logging frameworks
+        // Initialize Timber for logging throughout the app
+        // This enables all Timber.d(), Timber.i(), Timber.w(), Timber.e() calls
+        timber.log.Timber.plant(timber.log.Timber.DebugTree())
+        Log.i(TAG, "Timber logging initialized")
     }
 
     private fun initializeErrorHandling() {
