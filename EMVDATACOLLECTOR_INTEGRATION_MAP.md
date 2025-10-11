@@ -6,38 +6,67 @@
 
 ---
 
-## 🎯 INTEGRATION APPROACH: PARALLEL DATABASE SYSTEM
+## 🎯 INTEGRATION APPROACH: SINGLE DATABASE MIGRATION + PROXMARK3 EXPORT
 
-### Why Two Databases?
+### ⚠️ BREAKING CHANGE: Replace CardDataStore with EmvSessionDatabase
 
-**CardDataStore (EXISTING - File JSON):**
+**OLD System (CardDataStore - WILL BE REMOVED):**
 - Location: `/data/data/com.nfsp00f33r.app/files/card_profiles/{profileId}.json`
 - Type: Encrypted JSON files (AES-256-GCM)
 - Purpose: Card profile summaries (~30-40 EMV tags)
 - Used by: 5+ screens (Database, Dashboard, Analysis, CardReading, Debug)
-- Status: ✅ Production-grade, MUST NOT MODIFY
+- Problem: Incomplete data (missing 160+ EMV tags), file-based (no queries)
 
-**EmvSessionDatabase (NEW - Room SQLite):**
+**NEW System (EmvSessionDatabase - SINGLE SOURCE OF TRUTH):**
 - Location: `/data/data/com.nfsp00f33r.app/databases/emv_sessions.db`
 - Type: Room SQLite database
-- Purpose: Complete EMV sessions (200+ tags + full APDU log)
-- Used by: Future forensics/analysis screens
-- Status: ⚠️ To be created
+- Purpose: Complete EMV sessions (200+ tags + full APDU log + metadata)
+- Used by: ALL screens that need card data
+- Benefits: Complete data, queryable, relational, better performance
 
-### Integration Strategy
-**PARALLEL SAVE** - Both databases write after each scan:
+### Migration Strategy
+
+**Phase 1: Create EmvSessionDatabase** (Room with complete schema)
+
+**Phase 2: Create EmvDataCollector** (single-pass parser)
+
+**Phase 3: Update CardReadingViewModel** (save to EmvSessionDatabase only)
+
+**Phase 4: Migrate ALL Consumer Screens:**
+1. **DatabaseViewModel** - Replace `cardDataStore.getAllProfiles()` with `emvSessionDao.getAllSessions()`
+2. **DashboardViewModel** - Replace `cardDataStore.getAllProfiles()` with `emvSessionDao.getAllSessions()`
+3. **AnalysisViewModel** - Replace `cardDataStore.getAllProfiles()` with `emvSessionDao.getAllSessions()`
+4. **DebugCommandProcessor** - Replace `cardDataStore` references with `emvSessionDatabase`
+
+**Phase 5: Add Proxmark3 JSON Export**
+- `EmvSessionExporter.toProxmark3Json(sessionId)` - Export single session
+- `EmvSessionExporter.exportAllToProxmark3()` - Export all sessions
+- Compatible with Proxmark3 `emv` command format
+- Includes all 200+ tags in standard Proxmark3 structure
+
+**Phase 6: Remove CardDataStore** (cleanup)
+- Delete CardDataStore.kt
+- Delete CardDataStoreModule.kt
+- Delete file-based storage code
+- Update all imports
+
+### Data Migration
 ```kotlin
-// After NFC scan completes
-viewModelScope.launch(Dispatchers.IO) {
-    // NEW: Save to EmvSessionDatabase (Room)
-    emvCollector.saveToDatabase()
-    
-    // EXISTING: Save to CardDataStore (File JSON)
-    saveCardProfile(extractedData)  // Line 3297 - NO CHANGES
+// One-time migration function in EmvSessionDatabase
+suspend fun migrateFromCardDataStore() {
+    val oldProfiles = cardDataStore.getAllProfiles()
+    oldProfiles.forEach { profile ->
+        // Convert CardProfile → EmvSessionEntity
+        // Best-effort mapping (some data will be incomplete)
+        val session = EmvSessionEntity.fromLegacyProfile(profile)
+        emvSessionDao.insert(session)
+    }
+    // After migration, delete old files
+    cardDataStore.deleteAllProfiles()
 }
 ```
 
-**Zero Risk:** No modifications to existing CardDataStore code → Zero breaking changes
+**Result:** Single database, complete data, Proxmark3-compatible export
 
 ---
 
@@ -741,7 +770,7 @@ fun parseResponse(
 
 **Build & Verify:** Ensure EmvDataCollector compiles with database references
 
-### Phase 3: Integrate into CardReadingViewModel (1 hour)
+### Phase 3: Update CardReadingViewModel - Save to EmvSessionDatabase ONLY (1 hour)
 
 #### Step 3.1: Add Collector Instance
 ```kotlin
@@ -851,28 +880,29 @@ try {
 }
 ```
 
-#### Step 3.5: Update Dual Database Save
+#### Step 3.5: Replace Database Save - EmvSessionDatabase ONLY
 
 **At end of executeProxmark3EmvWorkflow (after line 1150):**
 
 ```kotlin
-// DUAL DATABASE SAVE (both systems)
+// SINGLE DATABASE SAVE (EmvSessionDatabase only)
 try {
-    // 1. Save to EmvSessionDatabase (NEW - Room)
     viewModelScope.launch(Dispatchers.IO) {
-        emvCollector.saveToDatabase()
-        Timber.d("EMV session saved to Room database")
+        val sessionId = emvCollector.saveToDatabase()
+        withContext(Dispatchers.Main) {
+            statusMessage = "Card saved to database (ID: $sessionId)"
+        }
+        Timber.d("EMV session saved to Room database: $sessionId")
     }
-    
-    // 2. Save to CardDataStore (EXISTING - File JSON)
-    saveCardProfile(extractedData)  // Existing function at line 3297
-    
 } catch (e: Exception) {
-    Timber.e(e, "Failed to save scan data to databases")
+    Timber.e(e, "Failed to save scan data to database")
+    withContext(Dispatchers.Main) {
+        statusMessage = "Database save failed: ${e.message}"
+    }
 }
 ```
 
-**No changes to existing saveCardProfile() function - it continues saving to CardDataStore**
+**DELETE old saveCardProfile() function (line 3297) - no longer needed**
 
 #### Step 3.6: Remove Old Functions (Cleanup)
 Delete manual extraction functions (Lines ~1362-1900):
@@ -895,29 +925,248 @@ Keep utility functions:
 - `testRocaVulnerability()` - Still needed
 - `addApduLogEntry()` - Can be REMOVED (collector handles it)
 
-### Phase 4: Initial Testing (30 minutes)
+### Phase 4: Migrate ALL Consumer Screens (2-3 hours)
+
+#### **🚨 CRITICAL: All screens must be updated to use EmvSessionDatabase**
+
+#### Step 4.1: Migrate DatabaseViewModel (screens/database/DatabaseViewModel.kt)
+**Current usage:** `cardDataStore.getAllProfiles()` at line 77
+
+**Changes needed:**
+```kotlin
+// BEFORE
+private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
+val storageProfiles = cardDataStore.getAllProfiles()
+
+// AFTER
+private val emvSessionDao by lazy { EmvSessionDatabase.getInstance(context).emvSessionDao() }
+val sessions = emvSessionDao.getAllSessions()
+
+// Update UI state to use EmvSessionEntity instead of CardProfile
+var cardProfiles by mutableStateOf(listOf<EmvSessionEntity>())
+```
+
+**Functions to update:**
+- `refreshData()` - Use `emvSessionDao.getAllSessions()`
+- `deleteCard(cardId)` - Use `emvSessionDao.deleteSession(sessionId)`
+- `exportCard(cardId)` - Use `EmvSessionExporter.toProxmark3Json(sessionId)`
+- `exportAll()` - Use `EmvSessionExporter.exportAllToProxmark3()`
+- `scanForRoca()` - Query `emvSessionDao.getVulnerableSessions()`
+
+#### Step 4.2: Migrate DashboardViewModel (screens/dashboard/DashboardViewModel.kt)
+**Current usage:** `cardDataStore.getAllProfiles()` at line 305
+
+**Changes needed:**
+```kotlin
+// BEFORE
+private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
+val storageProfiles = cardDataStore.getAllProfiles()
+
+// AFTER
+private val emvSessionDao by lazy { EmvSessionDatabase.getInstance(context).emvSessionDao() }
+val sessions = emvSessionDao.getAllSessions()
+
+// Update statistics calculation
+- Total cards: sessions.size
+- Encrypted cards: sessions.count { it.hasEncryptedData }
+- ROCA vulnerable: sessions.count { it.rocaVulnerable }
+```
+
+**Functions to update:**
+- `refreshData()` - Use `emvSessionDao.getAllSessions()`
+- Statistics calculations (totalCards, encryptedCards, uniqueCategories)
+- Card filtering/search
+
+#### Step 4.3: Migrate AnalysisViewModel (screens/analysis/AnalysisViewModel.kt)
+**Current usage:** `cardDataStore.getAllProfiles()` at line 195
+
+**Changes needed:**
+```kotlin
+// BEFORE
+private val cardDataStore by lazy { NfSp00fApplication.getCardDataStoreModule() }
+val profiles = cardDataStore.getAllProfiles()
+
+// AFTER
+private val emvSessionDao by lazy { EmvSessionDatabase.getInstance(context).emvSessionDao() }
+val sessions = emvSessionDao.getAllSessions()
+
+// For deep analysis, load full tag data
+val tags = emvTagDao.getTagsBySession(sessionId)
+val apduLog = emvApduLogDao.getLogBySession(sessionId)
+```
+
+**Functions to update:**
+- `loadCards()` - Use `emvSessionDao.getAllSessions()`
+- `analyzeCard(cardId)` - Load session + tags + APDU log
+- Export to JSON (Proxmark3 format)
+
+#### Step 4.4: Migrate DebugCommandProcessor (if exists)
+**Replace:** All `cardDataStore` references with `emvSessionDatabase`
+
+### Phase 5: Add Proxmark3 JSON Export (1 hour)
+
+#### Step 5.1: Create EmvSessionExporter.kt
+**Location:** `/android-app/src/main/kotlin/com/nfsp00f33r/app/storage/emv/EmvSessionExporter.kt`
+
+```kotlin
+object EmvSessionExporter {
+    /**
+     * Export single session to Proxmark3-compatible JSON
+     * Format matches Proxmark3 'emv' command output
+     */
+    suspend fun toProxmark3Json(sessionId: String): String {
+        val session = emvSessionDao.getSessionById(sessionId)
+        val tags = emvTagDao.getTagsBySession(sessionId)
+        val apduLog = emvApduLogDao.getLogBySession(sessionId)
+        
+        return JSONObject().apply {
+            put("timestamp", session.scanTimestamp)
+            put("card_uid", session.cardUid)
+            put("pan", session.pan)
+            put("expiry_date", session.expiryDate)
+            put("cardholder_name", session.cardholderName)
+            
+            // PPSE data
+            put("ppse", JSONObject().apply {
+                tags.filter { it.phase == "PPSE" }.forEach { tag ->
+                    put(tag.tag, tag.value)
+                }
+            })
+            
+            // AIDs (multiple if present)
+            put("aids", JSONArray().apply {
+                tags.filter { it.phase == "SELECT_AID" }
+                    .groupBy { it.metadata["aid"] }
+                    .forEach { (aid, aidTags) ->
+                        add(JSONObject().apply {
+                            put("aid", aid)
+                            aidTags.forEach { put(it.tag, it.value) }
+                        })
+                    }
+            })
+            
+            // GPO response
+            put("gpo", JSONObject().apply {
+                tags.filter { it.phase == "GPO" }.forEach { tag ->
+                    put(tag.tag, tag.value)
+                }
+            })
+            
+            // Records
+            put("records", JSONArray().apply {
+                tags.filter { it.phase == "READ_RECORD" }
+                    .groupBy { it.metadata["sfi"] to it.metadata["record"] }
+                    .forEach { (key, recordTags) ->
+                        add(JSONObject().apply {
+                            put("sfi", key.first)
+                            put("record", key.second)
+                            put("tags", JSONObject().apply {
+                                recordTags.forEach { put(it.tag, it.value) }
+                            })
+                        })
+                    }
+            })
+            
+            // Cryptogram
+            put("cryptogram", JSONObject().apply {
+                tags.filter { it.phase == "GENERATE_AC" }.forEach { tag ->
+                    put(tag.tag, tag.value)
+                }
+            })
+            
+            // Complete tag list (200+)
+            put("all_tags", JSONObject().apply {
+                tags.forEach { put(it.tag, it.value) }
+            })
+            
+            // APDU log
+            put("apdu_log", JSONArray().apply {
+                apduLog.forEach { apdu ->
+                    add(JSONObject().apply {
+                        put("command", apdu.command)
+                        put("response", apdu.response)
+                        put("status_word", apdu.statusWord)
+                        put("description", apdu.description)
+                        put("execution_time_ms", apdu.executionTime)
+                    })
+                }
+            })
+        }.toString(2)  // Pretty print with indent=2
+    }
+    
+    /**
+     * Export all sessions to Proxmark3 JSON array
+     */
+    suspend fun exportAllToProxmark3(): String {
+        val sessions = emvSessionDao.getAllSessions()
+        return JSONArray().apply {
+            sessions.forEach { session ->
+                add(JSONObject(toProxmark3Json(session.sessionId)))
+            }
+        }.toString(2)
+    }
+    
+    /**
+     * Save export to file
+     */
+    suspend fun saveToFile(sessionId: String, file: File) {
+        val json = toProxmark3Json(sessionId)
+        file.writeText(json)
+    }
+}
+```
+
+#### Step 5.2: Add Export Functions to ViewModels
+**DatabaseViewModel:**
+```kotlin
+fun exportToProxmark3(sessionId: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+        val json = EmvSessionExporter.toProxmark3Json(sessionId)
+        // Save to Downloads folder
+        val file = File(context.getExternalFilesDir(null), "emv_${sessionId}.json")
+        file.writeText(json)
+        Timber.i("Exported session $sessionId to ${file.absolutePath}")
+    }
+}
+
+fun exportAllToProxmark3() {
+    viewModelScope.launch(Dispatchers.IO) {
+        val json = EmvSessionExporter.exportAllToProxmark3()
+        val file = File(context.getExternalFilesDir(null), "emv_all_sessions.json")
+        file.writeText(json)
+        Timber.i("Exported all sessions to ${file.absolutePath}")
+    }
+}
+```
+
+### Phase 6: Initial Testing (30 minutes)
 
 1. **Build Test**
-   - Verify compilation after Phases 1-3
+   - Verify compilation after Phases 1-5
    - Check no missing dependencies
    
 2. **Real Card Test**
    - Scan actual EMV card
-   - Verify all 200+ tags captured
-   - Check EmvSessionDatabase entries created
-   - Verify CardDataStore still saves correctly
-   - Verify APDU log complete in both databases
+   - Verify all 200+ tags captured in EmvSessionDatabase
+   - Verify APDU log complete
+   - Test Proxmark3 JSON export
    
-3. **Performance Test**
+3. **Screen Migration Test**
+   - DatabaseScreen loads sessions correctly
+   - DashboardScreen shows correct statistics
+   - AnalysisScreen can analyze sessions
+   - All CRUD operations work (view, delete, export)
+   
+4. **Performance Test**
    - Measure scan time (should be identical)
    - Verify no UI lag during scan
-   - Confirm async DB writes work (both databases)
+   - Confirm async DB write completes
    
-4. **Database Query Test**
-   - Retrieve session by ID from EmvSessionDatabase
-   - Query tags by phase from EmvSessionDatabase
-   - Get profiles from CardDataStore (existing functionality)
-   - Export session to JSON
+5. **Export Test**
+   - Export single session to Proxmark3 JSON
+   - Verify JSON structure matches Proxmark3 format
+   - Verify all 200+ tags present in export
+   - Test "export all" functionality
 
 ---
 
@@ -1038,30 +1287,67 @@ Total: ~4100 lines across 6 well-organized files
 - [ ] Build and verify EmvDataCollector compiles with database references
 - [ ] **VERIFY:** Data flows through parseResponse() ONCE per APDU
 
-### Phase 3: Integration into CardReadingViewModel
+### Phase 3: Update CardReadingViewModel - EmvSessionDatabase ONLY
 - [ ] Add emvCollector instance to CardReadingViewModel
-- [ ] Replace PPSE phase manual extraction with collector.parseResponse()
-- [ ] Replace SELECT_AID phase manual extraction with collector.parseResponse()
-- [ ] Replace GPO phase manual extraction with collector.parseResponse()
-- [ ] Replace READ_RECORD phase manual extraction with collector.parseResponse()
-- [ ] Replace GENERATE_AC phase manual extraction with collector.parseResponse()
-- [ ] Replace INTERNAL_AUTH phase manual extraction with collector.parseResponse()
-- [ ] Replace GET_DATA phase manual extraction with collector.parseResponse()
-- [ ] Add collector.saveToDatabase() at end of workflow
+- [ ] Replace all 7 EMV phases with collector.parseResponse() calls
+- [ ] REMOVE old saveCardProfile() call - use collector.saveToDatabase() ONLY
 - [ ] Remove old extraction functions (extractAllAidsFromPpse, etc.)
 - [ ] Remove addApduLogEntry function (collector handles it)
+- [ ] Remove saveCardProfile function (no longer needed)
 - [ ] Update parsedEmvFields to use collector.getSessionData()
 - [ ] Build and verify compilation
 
-### Phase 4: Initial Integration Testing (30 minutes)
-- [ ] Test real NFC card scan after Phases 1-3
-- [ ] Verify EmvSessionDatabase entries created
-- [ ] Verify CardDataStore still saves correctly
-- [ ] Verify both databases populated
-- [ ] Verify all 200+ tags captured in EmvSessionDatabase
-- [ ] Build and verify no compilation errors
+### Phase 4: Migrate ALL Consumer Screens (2-3 hours)
+- [ ] DatabaseViewModel: Replace cardDataStore → emvSessionDao
+- [ ] DashboardViewModel: Replace cardDataStore → emvSessionDao
+- [ ] AnalysisViewModel: Replace cardDataStore → emvSessionDao  
+- [ ] DebugCommandProcessor: Replace cardDataStore → emvSessionDatabase
+- [ ] Update all CRUD operations (get, delete, export)
+- [ ] Build and verify all screens compile
 
-### Phase 5: File Separation (OPTIONAL - Do After Core Works)
+### Phase 5: Add Proxmark3 JSON Export (1 hour)
+- [ ] Create EmvSessionExporter.kt with toProxmark3Json()
+- [ ] Implement Proxmark3-compatible JSON structure (PPSE, AIDs, GPO, records, cryptogram, tags, APDU log)
+- [ ] Implement exportAllToProxmark3() batch export
+- [ ] Add export functions to DatabaseViewModel and AnalysisViewModel
+- [ ] Test export with real card data
+
+### Phase 6: Initial Integration Testing (30 minutes)
+- [ ] Test real NFC card scan
+- [ ] Verify EmvSessionDatabase has 200+ tags
+- [ ] Test Proxmark3 JSON export
+- [ ] Test all migrated screens (Database, Dashboard, Analysis)
+- [ ] Build successful
+
+### Phase 7: Remove CardDataStore (Cleanup) (30 minutes)
+
+#### Step 7.1: Delete CardDataStore Files
+```bash
+# Delete file-based storage system
+rm android-app/src/main/kotlin/com/nfsp00f33r/app/storage/CardDataStore.kt
+rm android-app/src/main/kotlin/com/nfsp00f33r/app/storage/CardDataStoreModule.kt
+rm android-app/src/main/kotlin/com/nfsp00f33r/app/storage/CardProfileAdapter.kt
+rm -rf /data/data/com.nfsp00f33r.app/files/card_profiles/  # Old encrypted files
+```
+
+#### Step 7.2: Remove from NfSp00fApplication
+```kotlin
+// DELETE from NfSp00fApplication.kt
+private lateinit var cardDataStoreModule: CardDataStoreModule
+fun getCardDataStoreModule() = cardDataStoreModule
+
+// DELETE from onCreate()
+cardDataStoreModule = CardDataStoreModule(this)
+moduleRegistry.register(cardDataStoreModule)
+```
+
+#### Step 7.3: Update Imports
+Search and replace in all files:
+- Remove: `import com.nfsp00f33r.app.storage.CardDataStore`
+- Remove: `import com.nfsp00f33r.app.storage.CardDataStoreModule`
+- Remove: `import com.nfsp00f33r.app.storage.CardProfileAdapter`
+
+### Phase 8: File Separation (OPTIONAL - Do After Core Works)
 - [ ] Create EmvWorkflowExecutor.kt (~1500 lines)
 - [ ] Move executeProxmark3EmvWorkflow to EmvWorkflowExecutor
 - [ ] Extract phase execution functions to EmvWorkflowExecutor
@@ -1072,7 +1358,7 @@ Total: ~4100 lines across 6 well-organized files
 - [ ] Remove moved code from CardReadingViewModel
 - [ ] Build and verify compilation
 
-### Phase 6: Final Testing
+### Phase 9: Final Testing
 - [ ] Test real NFC card scan
 - [ ] Verify all 200+ tags captured in allTags map
 - [ ] Verify structured data populated (ppse, aids, gpo, records, etc.)
@@ -1090,7 +1376,7 @@ Total: ~4100 lines across 6 well-organized files
 - [ ] Test error handling (card removed during scan, database errors, etc.)
 - [ ] Verify database file sizes reasonable (emv_sessions.db vs card_profiles/)
 
-### Phase 7: Cleanup & Documentation
+### Phase 10: Documentation & Commit
 - [ ] Remove all commented-out old code
 - [ ] Add comprehensive KDoc comments to new classes
 - [ ] Update CHANGELOG.md
@@ -1218,24 +1504,32 @@ val apduLog = sessionData.apduLog
 
 ## 📅 TIMELINE
 
-**Total:** ~5-7 hours for complete, production-grade implementation with dual database system
+**Total:** ~8-10 hours for complete single-database migration with Proxmark3 export
 
 ### Core Implementation (REQUIRED)
 - **Mapping:** 30 minutes ✅ COMPLETE (this document + DATABASE_INTEGRATION_STRATEGY.md)
 - **Phase 1 (EmvSessionDatabase):** 1-2 hours - Create Room database entities/DAOs
-- **Phase 2 (EmvDataCollector):** 1 hour - Create in-memory buffer with parseResponse()
-- **Phase 3 (Integration):** 1-1.5 hours - Integrate into CardReadingViewModel
-- **Phase 4 (Initial Testing):** 30 minutes - Verify dual database save works
-- **Phase 6 (Final Testing):** 30-60 minutes - Comprehensive testing
-- **Phase 7 (Cleanup):** 30 minutes - Documentation and commit
+- **Phase 2 (EmvDataCollector):** 1 hour - Create single-pass parser with parseResponse()
+- **Phase 3 (CardReadingViewModel):** 1-1.5 hours - Replace CardDataStore with EmvSessionDatabase
+- **Phase 4 (Migrate Screens):** 2-3 hours - Update DatabaseViewModel, DashboardViewModel, AnalysisViewModel
+- **Phase 5 (Proxmark3 Export):** 1 hour - Add EmvSessionExporter with Proxmark3-compatible JSON
+- **Phase 6 (Initial Testing):** 30 minutes - Verify database, screens, export work
+- **Phase 7 (Remove CardDataStore):** 30 minutes - Delete old file-based system
+- **Phase 8 (File Separation):** 1-2 hours - OPTIONAL - Extract EmvWorkflowExecutor (DO LATER)
+- **Phase 9 (Final Testing):** 30-60 minutes - Comprehensive testing
+- **Phase 10 (Documentation):** 30 minutes - Update docs and commit
 
-**Core Subtotal:** ~5-6 hours
+**Core Subtotal (Phases 1-7, 9-10):** ~8-9 hours
+**Optional Refactoring (Phase 8):** +1-2 hours
 
-### Optional Refactoring (DO LATER)
-- **Phase 5 (File Separation):** 1-2 hours - Extract EmvWorkflowExecutor/EmvApduBuilder
-- File separation should be done AFTER core functionality works
+### Key Milestones
+1. **After Phase 3:** CardReadingViewModel saves to EmvSessionDatabase (but screens still broken)
+2. **After Phase 4:** All screens migrated and working
+3. **After Phase 5:** Proxmark3 JSON export functional
+4. **After Phase 7:** CardDataStore completely removed, single database system
+5. **After Phase 9:** Production-ready with 200+ tags, complete APDU logs, Proxmark3 export
 
-**Priority:** Get Phases 1-4 working first, then decide on Phase 5 file separation
+**Priority:** Complete Phases 1-7 for full migration, Phase 8 file separation can wait
 
 ---
 
