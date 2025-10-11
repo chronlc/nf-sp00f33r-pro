@@ -880,55 +880,158 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 statusMessage = "Records complete: $recordsRead read, PAN ${if (panFound) "found" else "not found"}"
             }
             
-            // Phase 4B: Try additional common record locations for more EMV data
+            // Phase 4B: Extended Record Scan - Search for critical missing tags
             withContext(Dispatchers.Main) {
-                currentPhase = "Additional Records"
+                currentPhase = "Extended Record Scan"
                 progress = 0.7f
-                statusMessage = "Scanning for additional EMV data..."
+                statusMessage = "Searching for critical EMV tags..."
             }
             
-            // Try common record locations that might contain additional data
-            val additionalRecords = listOf(
-                Triple(1, 1, 0x0C), Triple(1, 2, 0x0C), Triple(1, 3, 0x0C), Triple(1, 4, 0x0C), Triple(1, 5, 0x0C),
-                Triple(2, 1, 0x14), Triple(2, 2, 0x14), Triple(2, 3, 0x14),
-                Triple(3, 1, 0x1C), Triple(3, 2, 0x1C)
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 4B: EXTENDED RECORD SCAN FOR CRITICAL TAGS")
+            
+            // Define critical tags needed for 100% attack coverage
+            val criticalTags = listOf(
+                "8E" to "CVM List (CVM Bypass + Offline Approval)",
+                "8C" to "CDOL1 (Amount Modification + GENERATE AC)",
+                "8D" to "CDOL2 (Enhanced GENERATE AC)",
+                "8F" to "CA Public Key Index (ROCA Analysis)",
+                "9F32" to "Issuer Public Key Exponent (ROCA)",
+                "9F47" to "ICC Public Key Exponent (ROCA)",
+                "93" to "Signed Static Data (SDA/DDA Verification)"
             )
             
-            var additionalRecordsRead = 0
-            for ((sfi, record, p2) in additionalRecords) {
-                // Skip if we already read this record from AFL
-                if (recordsToRead.any { it.first == sfi && it.second == record }) {
-                    continue
+            // Check which critical tags are missing
+            val allTagsFound = currentSessionData?.allTags ?: emptyMap()
+            val missingTags = criticalTags.filter { (tag, _) -> !allTagsFound.containsKey(tag) }
+            
+            if (missingTags.isNotEmpty()) {
+                Timber.i("Missing ${missingTags.size} critical tags:")
+                missingTags.forEach { (tag, description) ->
+                    Timber.i("  ❌ $tag - $description")
                 }
+                Timber.i("Initiating extended scan of SFI 1-3, Records 1-16...")
                 
-                val readCommand = byteArrayOf(0x00, 0xB2.toByte(), record.toByte(), p2.toByte(), 0x00)
-                val readResponse = if (isoDep != null) isoDep.transceive(readCommand) else null
+                var additionalRecordsRead = 0
+                var criticalTagsFound = 0
+                val aflReadSet = recordsToRead.map { it.first to it.second }.toSet()
                 
-                if (readResponse != null) {
-                    val readHex = readResponse.joinToString("") { "%02X".format(it) }
-                    val realStatusWord = if (readHex.length >= 4) readHex.takeLast(4) else "UNKNOWN"
-                    
-                    if (realStatusWord == "9000") {
-                        additionalRecordsRead++
-                        addApduLogEntry(
-                            "00B2" + String.format("%02X%02X", record, p2) + "00",
-                            readHex,
-                            realStatusWord,
-                            "READ RECORD SFI $sfi Rec $record (extra)",
-                            0L
-                        )
-                        displayParsedData("SFI${sfi}_REC${record}_EXTRA", readHex)
+                // Scan SFI 1-3, Records 1-16 (common EMV range)
+                for (sfi in 1..3) {
+                    for (record in 1..16) {
+                        // Skip if already read from AFL
+                        if (aflReadSet.contains(sfi to record)) {
+                            continue
+                        }
                         
-                        val detailedData = extractDetailedEmvData(readHex)
-                        parsedEmvFields = parsedEmvFields + detailedData
+                        val p2 = (sfi shl 3) or 0x04  // SFI in upper 5 bits, P2 reference: short EF identifier
+                        val readCommand = byteArrayOf(0x00, 0xB2.toByte(), record.toByte(), p2.toByte(), 0x00)
+                        val readResponse = if (isoDep != null) isoDep.transceive(readCommand) else null
                         
-                        Timber.i("Found additional record SFI $sfi Rec $record with ${detailedData.size} tags")
+                        if (readResponse != null) {
+                            val readHex = readResponse.joinToString("") { "%02X".format(it) }
+                            val realStatusWord = if (readHex.length >= 4) readHex.takeLast(4) else "UNKNOWN"
+                            
+                            when (realStatusWord) {
+                                "9000" -> {
+                                    additionalRecordsRead++
+                                    
+                                    // Parse with unified parser
+                                    val readBytes = readHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                                    val extendedParseResult = EmvTlvParser.parseResponse(readBytes, "EXTENDED_SCAN", "SFI$sfi-REC$record")
+                                    
+                                    // Check if we found any missing critical tags
+                                    val foundCritical = extendedParseResult.tags.keys.filter { tag ->
+                                        missingTags.any { (criticalTag, _) -> criticalTag == tag }
+                                    }
+                                    
+                                    if (foundCritical.isNotEmpty()) {
+                                        criticalTagsFound += foundCritical.size
+                                        Timber.i("✅ SFI $sfi Record $record: Found ${foundCritical.size} CRITICAL tags: ${foundCritical.joinToString(", ")}")
+                                        
+                                        foundCritical.forEach { tag ->
+                                            val description = criticalTags.find { it.first == tag }?.second ?: "Unknown"
+                                            val tagData = extendedParseResult.tags[tag]
+                                            Timber.i("   ✓ $tag ($description): ${tagData?.value?.take(32) ?: ""}...")
+                                        }
+                                        
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", record, p2) + "00",
+                                            readHex,
+                                            realStatusWord,
+                                            "READ RECORD SFI $sfi Rec $record (extended scan - ${foundCritical.size} critical tags)",
+                                            0L
+                                        )
+                                    } else {
+                                        // Found record but no critical tags - log quietly
+                                        Timber.d("SFI $sfi Record $record: ${extendedParseResult.tags.size} tags (no critical)")
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", record, p2) + "00",
+                                            readHex,
+                                            realStatusWord,
+                                            "READ RECORD SFI $sfi Rec $record (extended scan)",
+                                            0L
+                                        )
+                                    }
+                                    
+                                    // Store all parsed data
+                                    currentSessionData?.recordResponses?.add(extendedParseResult.tags)
+                                    currentSessionData?.allTags?.putAll(extendedParseResult.tags)
+                                    
+                                    // Update UI with detailed data
+                                    val detailedData = extendedParseResult.tags.mapNotNull { (tag, enriched) ->
+                                        enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                                    }.toMap()
+                                    parsedEmvFields = parsedEmvFields + detailedData
+                                }
+                                "6A83" -> {
+                                    // Record not found - expected, don't log
+                                }
+                                "6A82" -> {
+                                    // File not found - SFI doesn't exist, stop scanning this SFI
+                                    Timber.d("SFI $sfi not found, skipping remaining records")
+                                    break
+                                }
+                                else -> {
+                                    // Other error - continue
+                                    Timber.d("SFI $sfi Record $record: SW=$realStatusWord")
+                                }
+                            }
+                        }
                     }
                 }
-            }
-            
-            withContext(Dispatchers.Main) {
-                statusMessage = "Additional scan: $additionalRecordsRead extra records found"
+                
+                // Final summary of extended scan
+                val stillMissing = criticalTags.filter { (tag, _) -> 
+                    !(currentSessionData?.allTags?.containsKey(tag) ?: false)
+                }
+                
+                Timber.i("=".repeat(80))
+                Timber.i("EXTENDED SCAN COMPLETE:")
+                Timber.i("  Additional records read: $additionalRecordsRead")
+                Timber.i("  Critical tags found: $criticalTagsFound / ${missingTags.size}")
+                if (stillMissing.isEmpty()) {
+                    Timber.i("  ✅ ALL CRITICAL TAGS FOUND - 100% ATTACK COVERAGE")
+                } else {
+                    Timber.i("  ⚠️  Still missing ${stillMissing.size} tags:")
+                    stillMissing.forEach { (tag, description) ->
+                        Timber.i("     ❌ $tag - $description")
+                    }
+                }
+                Timber.i("=".repeat(80))
+                
+                withContext(Dispatchers.Main) {
+                    if (stillMissing.isEmpty()) {
+                        statusMessage = "Extended scan: ${criticalTagsFound}/${missingTags.size} critical tags found ✅"
+                    } else {
+                        statusMessage = "Extended scan: ${criticalTagsFound}/${missingTags.size} critical tags found (${stillMissing.size} missing)"
+                    }
+                }
+            } else {
+                Timber.i("✅ All critical tags already found in AFL records - skipping extended scan")
+                withContext(Dispatchers.Main) {
+                    statusMessage = "All critical tags found - 100% coverage ✅"
+                }
             }
             
             // Phase 5: GENERATE AC (Application Cryptogram) - Skip if already obtained in GPO
@@ -1058,48 +1161,62 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 Timber.e("GENERATE AC command failed - no response")
             }
             
-            // PHASE 4: GET DATA for specific EMV tags (Proxmark3-style primitives)
+            // PHASE 6: GET DATA for specific EMV tags (Proxmark3-style primitives)
             withContext(Dispatchers.Main) {
-                currentPhase = "GET DATA"
+                currentPhase = "Phase 6: GET DATA PRIMITIVES"
                 progress = 0.85f
-                statusMessage = "Extracting primitives..."
+                statusMessage = "Querying additional EMV data..."
             }
             
-            // PHASE 4: Enhanced GET DATA tags for research
-            val emvTags = listOf(
-                "9F36", // Application Transaction Counter (ATC)
-                "9F13", // Last Online ATC Register
-                "9F17", // PIN Try Counter
-                "9F4D", // Log Entry
-                "9F4F"  // Log Format
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 6: GET DATA PRIMITIVES (ALWAYS EXECUTE)")
+            Timber.i("Note: Running GET DATA even if cryptogram obtained in GPO for maximum data collection")
+            
+            // Comprehensive GET DATA tag list for 100% attack coverage
+            val getDataTags = listOf(
+                "9F17" to "PIN Try Counter",
+                "9F36" to "Application Transaction Counter (ATC)",
+                "9F13" to "Last Online ATC Register",
+                "9F4F" to "Log Format",
+                "9F4D" to "Log Entry",
+                "9F6E" to "Form Factor Indicator",
+                "9F6D" to "Mag-stripe Track1 Data",
+                "DF60" to "Proprietary Data 60",
+                "DF61" to "Proprietary Data 61",
+                "DF62" to "Proprietary Data 62",
+                "DF63" to "Proprietary Data 63",
+                "DF64" to "Proprietary Data 64"
             )
             
-            Timber.i("=".repeat(80))
-            Timber.i("PHASE 4: GET DATA PRIMITIVES")
             var getDataSuccessCount = 0
+            var logFormatFound = false
+            var logFormatValue = ""
             
-            for (tag in emvTags) {
+            for ((tag, description) in getDataTags) {
                 val getDataCommand = buildGetDataApdu(tag.toInt(16))
                 val getDataResponse = if (isoDep != null) isoDep.transceive(getDataCommand) else null
                 
                 if (getDataResponse != null) {
                     val getDataHex = getDataResponse.joinToString("") { "%02X".format(it) }
                     val realStatusWord = if (getDataHex.length >= 4) getDataHex.takeLast(4) else "UNKNOWN"
-                    addApduLogEntry(
-                        getDataCommand.joinToString("") { "%02X".format(it) },
-                        getDataHex,
-                        realStatusWord,
-                        "GET DATA $tag",
-                        0L
-                    )
                     
                     when (realStatusWord) {
                         "9000" -> {
-                            // PHASE 3D: Parse GET DATA response with unified parser
+                            getDataSuccessCount++
+                            
+                            addApduLogEntry(
+                                getDataCommand.joinToString("") { "%02X".format(it) },
+                                getDataHex,
+                                realStatusWord,
+                                "GET DATA $tag ($description)",
+                                0L
+                            )
+                            
+                            // Parse with unified parser
                             val getDataBytes = getDataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                             val getDataParseResult = EmvTlvParser.parseResponse(getDataBytes, "GET_DATA", tag)
                             
-                            // Store in session (merge with existing getDataResponse)
+                            // Store in session
                             if (currentSessionData?.getDataResponse == null) {
                                 currentSessionData?.getDataResponse = getDataParseResult.tags
                             } else {
@@ -1107,109 +1224,182 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                             }
                             currentSessionData?.allTags?.putAll(getDataParseResult.tags)
                             
-                            displayParsedData("GET_DATA_$tag", getDataHex)
-                            getDataSuccessCount++
+                            // Update UI with parsed data
+                            val detailedData = getDataParseResult.tags.mapNotNull { (tagKey, enriched) ->
+                                enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                            }.toMap()
+                            parsedEmvFields = parsedEmvFields + detailedData
                             
-                            // Log extracted tag data
-                            val tagData = getDataParseResult.tags[tag]
-                            when (tag) {
-                                "9F36" -> Timber.i("✓ ATC (9F36): ${tagData?.value ?: "N/A"}")
-                                "9F13" -> Timber.i("✓ Last Online ATC (9F13): ${tagData?.value ?: "N/A"}")
-                                "9F17" -> Timber.i("✓ PIN Try Counter (9F17): ${tagData?.value ?: "N/A"}")
-                                "9F4D" -> Timber.i("✓ Log Entry (9F4D): ${tagData?.value ?: "N/A"}")
-                                "9F4F" -> Timber.i("✓ Log Format (9F4F): ${tagData?.value ?: "N/A"}")
+                            // Check if this is Log Format (enables transaction log reading)
+                            if (tag == "9F4F" && getDataParseResult.tags.containsKey("9F4F")) {
+                                logFormatFound = true
+                                logFormatValue = getDataParseResult.tags["9F4F"]?.value ?: ""
+                                Timber.i("✅ $description ($tag): $logFormatValue - TRANSACTION LOGS ENABLED")
+                            } else {
+                                val tagData = getDataParseResult.tags[tag]?.value ?: getDataHex.substring(0, minOf(getDataHex.length, 32))
+                                Timber.i("✅ $description ($tag): ${tagData.take(32)}${if (tagData.length > 32) "..." else ""}")
                             }
-                            Timber.d("PHASE 3D: GET DATA $tag parsed ${getDataParseResult.tags.size} tags")
                         }
-                        "6A88" -> Timber.w("✗ Tag $tag: Referenced data not found")
-                        "6A81" -> Timber.w("✗ Tag $tag: Function not supported")
-                        else -> Timber.w("✗ Tag $tag: Failed with SW=$realStatusWord")
+                        "6A88" -> {
+                            // Referenced data not found - normal for many tags
+                            Timber.d("   $description ($tag): Not supported by card")
+                        }
+                        "6A81" -> {
+                            // Function not supported
+                            Timber.d("   $description ($tag): Function not supported")
+                        }
+                        else -> {
+                            // Other error
+                            Timber.d("   $description ($tag): SW=$realStatusWord")
+                            addApduLogEntry(
+                                getDataCommand.joinToString("") { "%02X".format(it) },
+                                getDataHex,
+                                realStatusWord,
+                                "GET DATA $tag ($description) - FAILED",
+                                0L
+                            )
+                        }
                     }
                 } else {
-                    Timber.e("✗ Tag $tag: No response from card")
+                    Timber.e("✗ $description ($tag): No response from card")
                 }
             }
             
-            Timber.i("PHASE 4 COMPLETE: $getDataSuccessCount/${emvTags.size} primitives extracted")
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 6 COMPLETE: $getDataSuccessCount / ${getDataTags.size} GET DATA tags retrieved")
             Timber.i("=".repeat(80))
             
-            // PHASE 5: Transaction Log Reading (if Log Format tag 9F4F found)
-            val logFormat = extractLogFormatFromAllResponses(apduLog)
-            if (logFormat.isNotEmpty() && logFormat.length >= 4) {
-                Timber.i("=".repeat(80))
-                Timber.i("PHASE 5: TRANSACTION LOG READING")
-                
-                try {
-                    // Parse Log Format (tag 9F4F): byte 0 = SFI (bits 3-7), byte 1 = record count
-                    val logFormatBytes = logFormat.chunked(2).map { it.toInt(16) }
-                    val logSfi = (logFormatBytes[0] shr 3) and 0x1F
-                    val logRecordCount = if (logFormatBytes.size > 1) logFormatBytes[1] else 0
-                    
-                    Timber.i("Log Format: SFI=$logSfi, Record Count=$logRecordCount")
-                    
-                    if (logSfi > 0 && logRecordCount > 0 && logRecordCount <= 10) {
-                        withContext(Dispatchers.Main) {
-                            currentPhase = "Transaction Logs"
-                            progress = 0.9f
-                            statusMessage = "Reading $logRecordCount transaction logs..."
-                        }
-                        
-                        var logsRead = 0
-                        for (recNum in 1..logRecordCount) {
-                            val readLogCommand = byteArrayOf(
-                                0x00,                           // CLA
-                                0xB2.toByte(),                  // INS (READ RECORD)
-                                recNum.toByte(),                // P1 (record number)
-                                ((logSfi shl 3) or 0x04).toByte(), // P2 (SFI + read mode)
-                                0x00                            // Le
-                            )
-                            
-                            val logResponse = if (isoDep != null) isoDep.transceive(readLogCommand) else null
-                            
-                            if (logResponse != null) {
-                                val logHex = logResponse.joinToString("") { "%02X".format(it) }
-                                val logSw = if (logHex.length >= 4) logHex.takeLast(4) else "UNKNOWN"
-                                
-                                addApduLogEntry(
-                                    readLogCommand.joinToString("") { "%02X".format(it) },
-                                    logHex,
-                                    logSw,
-                                    "READ TRANSACTION LOG #$recNum",
-                                    0L
-                                )
-                                
-                                if (logSw == "9000") {
-                                    logsRead++
-                                    displayParsedData("TRANSACTION_LOG_$recNum", logHex)
-                                    
-                                    // Parse transaction log fields (simplified)
-                                    val logData = if (logHex.length > 4) logHex.dropLast(4) else ""
-                                    Timber.i("✓ Transaction Log #$recNum: $logData")
-                                    // Could parse: amount, date, ATC, country code, etc.
-                                } else {
-                                    Timber.w("✗ Transaction Log #$recNum: Failed with SW=$logSw")
-                                }
-                            }
-                        }
-                        
-                        Timber.i("PHASE 5 COMPLETE: $logsRead/$logRecordCount transaction logs read")
-                    } else {
-                        Timber.w("PHASE 5: Invalid log parameters - SFI=$logSfi, Count=$logRecordCount (SKIPPED)")
-                    }
-                } catch (e: Exception) {
-                    Timber.e(e, "PHASE 5: Error reading transaction logs")
+            withContext(Dispatchers.Main) {
+                statusMessage = "GET DATA complete: $getDataSuccessCount / ${getDataTags.size} tags"
+            }
+            
+            // PHASE 7: Transaction Log Reading (if Log Format found)
+            if (logFormatFound && logFormatValue.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    currentPhase = "Phase 7: TRANSACTION LOGS"
+                    progress = 0.92f
+                    statusMessage = "Reading transaction history..."
                 }
                 
                 Timber.i("=".repeat(80))
+                Timber.i("PHASE 7: TRANSACTION LOG READING")
+                Timber.i("Log Format (9F4F) found: $logFormatValue")
+                
+                try {
+                    // Parse Log Format: typically 2 bytes
+                    // Byte 0: SFI (upper 5 bits) + record reference
+                    // Byte 1: Number of log records
+                    val logFormatBytes = logFormatValue.chunked(2).map { it.toInt(16) }
+                    
+                    if (logFormatBytes.size >= 2) {
+                        val byte0 = logFormatBytes[0]
+                        val byte1 = logFormatBytes[1]
+                        
+                        val logSfi = (byte0 shr 3) and 0x1F  // Upper 5 bits
+                        val logRecordCount = byte1 and 0x1F  // Lower 5 bits typically
+                        
+                        Timber.i("Parsed Log Format: SFI=$logSfi, Record Count=$logRecordCount")
+                        
+                        if (logSfi in 1..31 && logRecordCount in 1..30) {
+                            var logsRead = 0
+                            val transactionLogs = mutableListOf<Map<String, EnrichedTagData>>()
+                            
+                            // Read each transaction log record
+                            for (recordNum in 1..logRecordCount) {
+                                val logP2 = (logSfi shl 3) or 0x04
+                                val logReadCommand = byteArrayOf(0x00, 0xB2.toByte(), recordNum.toByte(), logP2.toByte(), 0x00)
+                                val logReadResponse = if (isoDep != null) isoDep.transceive(logReadCommand) else null
+                                
+                                if (logReadResponse != null) {
+                                    val logReadHex = logReadResponse.joinToString("") { "%02X".format(it) }
+                                    val logStatusWord = if (logReadHex.length >= 4) logReadHex.takeLast(4) else "UNKNOWN"
+                                    
+                                    if (logStatusWord == "9000") {
+                                        logsRead++
+                                        
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", recordNum, logP2) + "00",
+                                            logReadHex,
+                                            logStatusWord,
+                                            "READ TRANSACTION LOG #$recordNum",
+                                            0L
+                                        )
+                                        
+                                        // Parse log entry
+                                        val logBytes = logReadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                                        val logParseResult = EmvTlvParser.parseResponse(logBytes, "TRANSACTION_LOG", "LOG$recordNum")
+                                        
+                                        transactionLogs.add(logParseResult.tags)
+                                        currentSessionData?.allTags?.putAll(logParseResult.tags)
+                                        
+                                        Timber.i("✅ Transaction Log #$recordNum: ${logParseResult.tags.size} tags")
+                                        
+                                        // Log key transaction data
+                                        val amount = logParseResult.tags["9F02"]?.valueDecoded ?: "N/A"
+                                        val date = logParseResult.tags["9A"]?.valueDecoded ?: "N/A"
+                                        val country = logParseResult.tags["9F1A"]?.valueDecoded ?: "N/A"
+                                        Timber.i("   Amount: $amount, Date: $date, Country: $country")
+                                    } else if (logStatusWord == "6A83") {
+                                        // Record not found - end of logs
+                                        Timber.i("Transaction log #$recordNum not found - end of logs")
+                                        break
+                                    } else {
+                                        Timber.w("Transaction log #$recordNum failed: SW=$logStatusWord")
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", recordNum, logP2) + "00",
+                                            logReadHex,
+                                            logStatusWord,
+                                            "READ TRANSACTION LOG #$recordNum - FAILED",
+                                            0L
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            Timber.i("TRANSACTION LOG READING COMPLETE: $logsRead / $logRecordCount logs read")
+                            
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "Transaction logs: $logsRead / $logRecordCount read ✅"
+                            }
+                            
+                            // Store transaction logs in session
+                            if (transactionLogs.isNotEmpty()) {
+                                currentSessionData?.let { session ->
+                                    // Add transaction logs as special records
+                                    session.recordResponses.addAll(transactionLogs)
+                                }
+                            }
+                        } else {
+                            Timber.w("Invalid Log Format parsed: SFI=$logSfi, Count=$logRecordCount - skipping")
+                        }
+                    } else {
+                        Timber.w("Log Format too short: ${logFormatBytes.size} bytes - expected 2+")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to parse Log Format: $logFormatValue")
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "Transaction log parsing failed"
+                    }
+                }
+                
+                Timber.i("=".repeat(80))
+                Timber.i("PHASE 7 COMPLETE: Transaction log reading finished")
+                Timber.i("=".repeat(80))
             } else {
-                Timber.i("PHASE 5: No Log Format (9F4F) found - skipping transaction log reading")
+                Timber.i("=".repeat(80))
+                Timber.i("PHASE 7: TRANSACTION LOGS - SKIPPED (Log Format 9F4F not found)")
+                Timber.i("=".repeat(80))
+                
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Transaction logs: Not supported by card"
+                }
             }
             
-            // Phase 6: Final Processing
+            // Phase 8: Final Processing
             withContext(Dispatchers.Main) {
-                currentPhase = "Complete"
+                currentPhase = "Scan Complete"
                 progress = 1.0f
-                statusMessage = "EMV scan complete - PROXMARK3 workflow"
+                statusMessage = "EMV scan complete - PROXMARK3 workflow ✅"
             }
             
         } catch (e: Exception) {
