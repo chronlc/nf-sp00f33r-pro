@@ -44,6 +44,7 @@ object EmvTlvParser {
     // These are EMV spec quirks where the tag encoding doesn't match the data structure
     // Based on ChAP.py reference: tags marked as ITEM are primitive, TEMPLATE are constructed
     private val ALWAYS_PRIMITIVE_TAGS = setOf(
+        "82",  // Application Interchange Profile (AIP) - BINARY ITEM - 2-byte bitmask, NOT a template
         "84",  // DF Name - MIXED ITEM - Contains AID/DF Name directly, NOT nested tags
         "86",  // Issuer Script Command - BER_TLV ITEM but NOT recursive template
         "87",  // Application Priority Indicator - BER_TLV ITEM
@@ -51,8 +52,14 @@ object EmvTlvParser {
         "92",  // Issuer Public Key Remainder - BINARY ITEM - Raw RSA key remainder bytes
         "93",  // Signed Static Application Data - BINARY ITEM - Raw signature data
         "94",  // Application File Locator - BINARY ITEM - AFL records, not TLV
+        "95",  // Terminal Verification Results (TVR) - BINARY ITEM - 5-byte bitmask
         "97",  // Transaction Certificate Data Object List (TDOL) - BER_TLV ITEM
+        "9B",  // Transaction Status Information (TSI) - BINARY ITEM - 2-byte bitmask
         "9F32", // Issuer Public Key Exponent - BINARY ITEM - Raw exponent bytes
+        "9F33", // Terminal Capabilities - BINARY ITEM - 3-byte bitmask
+        "9F34", // CVM Results - BINARY ITEM - 3-byte result
+        "9F35", // Terminal Type - BINARY ITEM - 1-byte value
+        "9F40", // Additional Terminal Capabilities - BINARY ITEM - 5-byte bitmask
         "9F46", // ICC Public Key Certificate - BINARY ITEM - Raw RSA certificate bytes
         "9F47", // ICC Public Key Exponent - BINARY ITEM - Raw exponent bytes
         "9F48", // ICC Public Key Remainder - BINARY ITEM - Raw RSA key remainder bytes

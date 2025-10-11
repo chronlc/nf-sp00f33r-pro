@@ -574,21 +574,30 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             
             // Use EmvTlvParser to parse AFL for intelligent record reading
             val aflFromGpo = extractAflFromAllResponses(apduLog)
+            Timber.i("=".repeat(80))
+            Timber.i("AFL PARSING AND RECORD READING")
+            Timber.i("AFL extracted from responses: ${if (aflFromGpo.isNotEmpty()) aflFromGpo else "NONE"}")
             val recordsToRead = if (aflFromGpo.isNotEmpty()) {
                 val aflEntries = EmvTlvParser.parseAfl(aflFromGpo)
                 if (aflEntries.isNotEmpty()) {
-                    Timber.i("Using AFL-based record reading: ${aflEntries.size} AFL entries")
-                    aflEntries.flatMap { entry ->
+                    Timber.i("✓ AFL parsed successfully: ${aflEntries.size} entries")
+                    aflEntries.forEach { entry ->
+                        Timber.i("  SFI ${entry.sfi}: Records ${entry.startRecord}-${entry.endRecord}, Offline=${entry.offlineRecords}")
+                    }
+                    val records = aflEntries.flatMap { entry ->
                         (entry.startRecord..entry.endRecord).map { record ->
                             Triple(entry.sfi, record, (entry.sfi shl 3) or 0x04)
                         }
                     }
+                    Timber.i("Will read ${records.size} total records")
+                    records
                 } else {
+                    Timber.w("✗ AFL parsing failed - using fallback")
                     // Fallback to parseAflForRecords if EmvTlvParser fails
                     parseAflForRecords(aflFromGpo)
                 }
             } else {
-                Timber.w("No AFL found - using fallback record locations")
+                Timber.w("✗ No AFL found - using fallback record locations")
                 // Fallback to common record locations if no AFL
                 listOf(
                     Triple(1, 1, 0x14), Triple(1, 2, 0x14), Triple(1, 3, 0x14),
@@ -596,6 +605,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     Triple(3, 1, 0x1C), Triple(3, 2, 0x1C)
                 )
             }
+            Timber.i("=".repeat(80))
             
             var recordsRead = 0
             var panFound = false
@@ -1864,16 +1874,30 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private fun buildRealEmvTagsMap(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>, pan: String, aid: String, track2: String): Map<String, String> {
         val tags = mutableMapOf<String, String>()
         
+        Timber.i("=" + "=".repeat(79))
+        Timber.i("BUILDING EMV TAGS MAP FROM ${apduLog.size} APDU RESPONSES")
+        
         // Parse ALL APDU responses (except PPSE) and collect ALL tags
-        apduLog.forEach { apdu ->
+        apduLog.forEachIndexed { index, apdu ->
             // Skip PPSE responses - we only want selected AID data
             if (apdu.description.contains("PPSE", ignoreCase = true)) {
-                return@forEach
+                Timber.d("  [$index] ${apdu.description} - SKIPPED (PPSE)")
+                return@forEachIndexed
             }
             
             // Convert hex string to ByteArray and parse
             try {
-                val responseBytes = apdu.response.chunked(2)
+                // CRITICAL: Strip status word (last 2 bytes: 9000, 6xxx, etc.) before parsing
+                // Status word is NOT part of the TLV data and causes false tag detection
+                val responseHex = apdu.response
+                val responseDataHex = if (responseHex.length >= 4) {
+                    // Remove last 4 hex chars (2 bytes = status word)
+                    responseHex.substring(0, responseHex.length - 4)
+                } else {
+                    responseHex // Keep as-is if too short (shouldn't happen)
+                }
+                
+                val responseBytes = responseDataHex.chunked(2)
                     .map { it.toInt(16).toByte() }
                     .toByteArray()
                 
@@ -1883,10 +1907,28 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     validateTags = true
                 )
                 
+                // Check if tag 90 is in this response
+                if (parseResult.tags.containsKey("90")) {
+                    val tag90Value = parseResult.tags["90"] ?: ""
+                    Timber.i("  [$index] ${apdu.description} - ✓ Contains Tag 90: ${tag90Value.length} chars")
+                    Timber.d("    Tag 90 value: ${tag90Value.take(64)}${if (tag90Value.length > 64) "..." else ""}")
+                }
+                
                 // Add all found tags to the map (later entries overwrite earlier ones)
+                val previousTag90 = tags["90"]
                 tags.putAll(parseResult.tags)
+                
+                // Log if tag 90 was overwritten
+                if (previousTag90 != null && parseResult.tags.containsKey("90")) {
+                    val newTag90 = parseResult.tags["90"] ?: ""
+                    if (previousTag90 != newTag90) {
+                        Timber.w("  ⚠️ Tag 90 OVERWRITTEN: ${previousTag90.length} chars → ${newTag90.length} chars")
+                    }
+                }
+                
+                Timber.d("  [$index] ${apdu.description} - ${parseResult.tags.size} tags extracted, map now has ${tags.size} tags")
             } catch (e: Exception) {
-                Timber.w(e, "Failed to parse APDU: ${apdu.description}")
+                Timber.w(e, "  [$index] ${apdu.description} - PARSE FAILED: ${e.message}")
             }
         }
         
@@ -1895,7 +1937,19 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         if (aid.isNotEmpty()) tags["4F"] = aid  
         if (track2.isNotEmpty()) tags["57"] = track2
         
+        // Final tag 90 status
+        val finalTag90 = tags["90"]
+        if (finalTag90 != null) {
+            Timber.i("📦 Final Tag 90 in map: ${finalTag90.length} chars")
+            if (finalTag90.isEmpty()) {
+                Timber.w("⚠️ WARNING: Tag 90 is EMPTY in final map!")
+            }
+        } else {
+            Timber.w("⚠️ WARNING: Tag 90 NOT FOUND in final map!")
+        }
+        
         Timber.i("📦 Built EMV tags map: ${tags.size} total tags from parsing ${apduLog.size} APDUs")
+        Timber.i("=" + "=".repeat(79))
         
         return tags.toMap()
     }
