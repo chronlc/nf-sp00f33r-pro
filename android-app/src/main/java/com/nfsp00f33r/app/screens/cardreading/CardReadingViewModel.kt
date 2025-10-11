@@ -234,8 +234,8 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         rocaVulnerabilityStatus = "Analyzing..."
         isRocaVulnerable = false
         
-        // Variable to store AIDs extracted from PPSE response (dynamic)
-        var extractedAids = listOf<String>()
+        // Variable to store AID entries extracted from PPSE response (PHASE 1: Multi-AID)
+        var extractedAidEntries = listOf<AidEntry>()
         
         // Connect to card using IsoDep for real NFC communication
         val isoDep = android.nfc.tech.IsoDep.get(tag)
@@ -341,7 +341,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     Timber.w("PPSE selection failed with SW=$realStatusWord (tried both 2PAY and 1PAY), switching strategy")
                 } else {
                     // Parse PPSE response for ALL AIDs (PHASE 1: Multi-AID analysis)
-                    val realAidEntries = extractAllAidsFromPse(ppseHex)
+                    val realAidEntries = extractAllAidsFromPpse(ppseHex)
                     if (realAidEntries.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
                             statusMessage = "PPSE Success ($ppseMode) - Found ${realAidEntries.size} AID(s)"
@@ -361,94 +361,147 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 Timber.e("PPSE command failed - no response from card")
             }
             
-            // Phase 2: Parse PPSE and SELECT AIDs dynamically from PPSE response
+            // Phase 2: Multi-AID Selection - Process ALL AIDs (PHASE 1 COMPLETE)
+            // ChAP-inspired: Process ALL AIDs to reveal weak secondary applications
             withContext(Dispatchers.Main) {
-                currentPhase = "AID Selection"
+                currentPhase = "Multi-AID Analysis"
                 progress = 0.2f
-                statusMessage = "Selecting AID..."
+                statusMessage = "Analyzing all applications..."
             }
             
             // Use AIDs extracted from PPSE response (dynamic, real transaction)
             // Fallback to common AIDs only if PPSE failed
-            val aidsToTry = if (extractedAids.isNotEmpty()) {
-                Timber.i("Using ${extractedAids.size} AIDs from PPSE response (dynamic)")
-                // Convert hex strings to ByteArray
-                extractedAids.map { hexString ->
-                    hexString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            val aidEntriesToTry = if (extractedAidEntries.isNotEmpty()) {
+                Timber.i("=" + "=".repeat(79))
+                Timber.i("MULTI-AID WORKFLOW: Processing ${extractedAidEntries.size} AIDs from PPSE")
+                extractedAidEntries.forEachIndexed { idx, entry ->
+                    Timber.i("  AID #${idx + 1}: ${entry.aid}")
+                    Timber.i("    Label: ${entry.label}")
+                    Timber.i("    Priority: ${entry.priority}")
                 }
+                Timber.i("="  + "=".repeat(79))
+                extractedAidEntries
             } else {
                 Timber.w("PPSE failed - falling back to common AIDs (static)")
+                // Create AidEntry objects for fallback AIDs
                 listOf(
-                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x04, 0x10, 0x10), // MasterCard
-                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x03, 0x10, 0x10), // Visa
-                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x00, 0x25, 0x01), // Amex
-                    byteArrayOf(0xA0.toByte(), 0x00, 0x00, 0x01, 0x52, 0x30, 0x10) // Discover
+                    AidEntry("A0000000041010", "MasterCard", 0),
+                    AidEntry("A0000000031010", "Visa", 0),
+                    AidEntry("A0000000250101", "Amex", 0),
+                    AidEntry("A0000001523010", "Discover", 0)
                 )
             }
             
-            var aidSelected = false
+            var successfulAids = 0
+            var failedAids = 0
             var selectedAidHex = ""
             
-            for (aid in aidsToTry) {
-                val aidCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid
+            // Process ALL AIDs (not just first) - ChAP approach
+            for ((aidIndex, aidEntry) in aidEntriesToTry.withIndex()) {
+                val aidHexString = aidEntry.aid
+                val aidLabel = aidEntry.label
+                val aidPriority = aidEntry.priority
+                
+                withContext(Dispatchers.Main) {
+                    statusMessage = "AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel"
+                }
+                
+                val aid = aidHexString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                val aidCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid + byteArrayOf(0x00)
                 val aidResponse = if (isoDep != null) isoDep.transceive(aidCommand) else null
                 
                 if (aidResponse != null) {
                     val aidHex = aidResponse.joinToString("") { "%02X".format(it) }
                     val realStatusWord = if (aidHex.length >= 4) aidHex.takeLast(4) else "UNKNOWN"
-                    val aidHexString = aid.joinToString("") { "%02X".format(it) }
                     
                     addApduLogEntry(
                         "00A40400" + String.format("%02X", aid.size) + aidHexString,
                         aidHex,
                         realStatusWord,
-                        "SELECT AID $aidHexString",
+                        "SELECT AID #${aidIndex + 1}: $aidLabel",
                         0L
                     )
                     
                     // LIVE ANALYSIS: Check what the card actually returned
                     when (realStatusWord) {
                         "9000" -> {
-                            displayParsedData("AID", aidHex)
-                            statusMessage = "AID $aidHexString Selected Successfully"
-                            selectedAidHex = aidHexString
-                            aidSelected = true
+                            successfulAids++
+                            displayParsedData("AID_${aidIndex + 1}_$aidLabel", aidHex)
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✓ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Priority $aidPriority)"
+                            }
+                            Timber.i("✓ AID #${aidIndex + 1} selected: $aidLabel ($aidHexString)")
                             
                             // Parse FCI template from successful AID selection
                             val fciData = extractFciFromAidResponse(aidHex)
                             if (fciData.isNotEmpty()) {
-                                statusMessage += " - FCI: ${fciData.take(16)}..."
+                                Timber.d("  FCI: ${fciData.take(32)}...")
                             }
-                            break
+                            
+                            // Store first successful AID for GPO
+                            if (selectedAidHex.isEmpty()) {
+                                selectedAidHex = aidHexString
+                            }
+                            
+                            // Continue processing ALL AIDs (don't break like Proxmark3)
+                            // This reveals weak secondary applications
                         }
                         "6A82" -> {
-                            statusMessage = "AID $aidHexString Not Found - Trying next..."
-                            Timber.d("AID $aidHexString not found on card")
+                            failedAids++
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✗ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Not Found)"
+                            }
+                            Timber.d("✗ AID #${aidIndex + 1} not found: $aidLabel")
                         }
                         "6A81" -> {
-                            statusMessage = "AID $aidHexString Not Supported - Trying next..."
-                            Timber.d("AID $aidHexString not supported by card")
+                            failedAids++
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✗ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Not Supported)"
+                            }
+                            Timber.d("✗ AID #${aidIndex + 1} not supported: $aidLabel")
                         }
                         else -> {
-                            statusMessage = "AID $aidHexString Failed ($realStatusWord) - Trying next..."
-                            Timber.w("AID $aidHexString selection failed with SW=$realStatusWord")
+                            failedAids++
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✗ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel ($realStatusWord)"
+                            }
+                            Timber.w("✗ AID #${aidIndex + 1} failed: $aidLabel with SW=$realStatusWord")
                         }
                     }
                 } else {
-                    statusMessage = "No response for AID ${aid.joinToString("") { "%02X".format(it) }}"
-                    Timber.e("No response from card for AID selection")
+                    failedAids++
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "✗ No response for AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel"
+                    }
+                    Timber.e("✗ No response for AID #${aidIndex + 1}: $aidLabel")
                 }
             }
             
+            // Multi-AID analysis summary
+            Timber.i("="  + "=".repeat(79))
+            Timber.i("MULTI-AID ANALYSIS COMPLETE")
+            Timber.i("  Successful: $successfulAids / ${aidEntriesToTry.size}")
+            Timber.i("  Failed: $failedAids / ${aidEntriesToTry.size}")
+            Timber.i("  Selected for GPO: $selectedAidHex")
+            Timber.i("="  + "=".repeat(79))
+            
+            val aidSelected = successfulAids > 0
+            
             if (!aidSelected) {
                 withContext(Dispatchers.Main) {
-                    statusMessage = "CRITICAL: No valid AID found - Card may not support EMV or be blocked"
+                    statusMessage = "CRITICAL: No valid AID found - All ${aidEntriesToTry.size} AIDs failed"
                     currentPhase = "Error"
                     progress = 0.0f
                 }
                 Timber.e("No AID selection succeeded - aborting EMV workflow")
                 return // Don't continue if no AID selected
             }
+            
+            withContext(Dispatchers.Main) {
+                statusMessage = "Multi-AID complete: $successfulAids/${aidEntriesToTry.size} selected"
+            }
+            
+            // TODO PHASE 3: Add AIP security analysis here to compare all successful AIDs
             
             // Phase 3: GET PROCESSING OPTIONS with dynamic PDOL data
             withContext(Dispatchers.Main) {
@@ -1139,9 +1192,9 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Legacy function for backward compatibility - delegates to extractAllAidsFromPpse
      */
-    @Deprecated("Use extractAllAidsFromPse() for multi-AID support", ReplaceWith("extractAllAidsFromPse(hexResponse).map { it.aid }"))
+    @Deprecated("Use extractAllAidsFromPpse() for multi-AID support", ReplaceWith("extractAllAidsFromPpse(hexResponse).map { it.aid }"))
     private fun extractAidsFromPpseResponse(hexResponse: String): List<String> {
-        return extractAllAidsFromPse(hexResponse).map { it.aid }
+        return extractAllAidsFromPpse(hexResponse).map { it.aid }
     }
     
     /**
