@@ -285,6 +285,16 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private suspend fun executeProxmark3EmvWorkflow(tag: android.nfc.Tag) {
         val cardId = tag.id.joinToString("") { "%02X".format(it) }
         
+        // PHASE 3: Initialize session tracking
+        currentSessionId = UUID.randomUUID().toString()
+        sessionStartTime = System.currentTimeMillis()
+        currentSessionData = SessionScanData(
+            sessionId = currentSessionId,
+            scanStartTime = sessionStartTime,
+            cardUid = cardId
+        )
+        Timber.i("PHASE 3: Started EMV session $currentSessionId for card $cardId")
+        
         // Clear previous ROCA analysis results
         EmvTlvParser.clearRocaAnalysisResults()
         rocaVulnerabilityStatus = "Analyzing..."
@@ -396,13 +406,33 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     }
                     Timber.w("PPSE selection failed with SW=$realStatusWord (tried both 2PAY and 1PAY), switching strategy")
                 } else {
-                    // Parse PPSE response for ALL AIDs (PHASE 1: Multi-AID analysis)
-                    val realAidEntries = extractAllAidsFromPpse(ppseHex)
+                    // PHASE 3B: Parse PPSE response with unified parser
+                    val ppseBytes = ppseHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    val ppseParseResult = EmvTlvParser.parseResponse(ppseBytes, "PPSE", ppseMode)
+                    
+                    // Store parsed PPSE data in session
+                    currentSessionData?.ppseResponse = ppseParseResult.tags
+                    currentSessionData?.allTags?.putAll(ppseParseResult.tags)
+                    
+                    // Extract AIDs (tag 4F) from parsed response
+                    val aidTags = ppseParseResult.tags.filter { it.key == "4F" }
+                    val realAidEntries = aidTags.map { (_, enrichedTag) ->
+                        // Extract label (tag 50) and priority (tag 87) if available
+                        val label = ppseParseResult.tags["50"]?.valueDecoded ?: "Unknown"
+                        val priorityStr = ppseParseResult.tags["87"]?.value ?: "00"
+                        val priority = priorityStr.toIntOrNull(16) ?: 0
+                        AidEntry(
+                            aid = enrichedTag.value,
+                            label = label,
+                            priority = priority
+                        )
+                    }
+                    
                     if (realAidEntries.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
                             statusMessage = "PPSE Success ($ppseMode) - Found ${realAidEntries.size} AID(s)"
                         }
-                        Timber.i("PPSE ($ppseMode) returned ${realAidEntries.size} real AIDs:")
+                        Timber.i("PHASE 3B: PPSE ($ppseMode) returned ${realAidEntries.size} AIDs, ${ppseParseResult.tags.size} total tags")
                         realAidEntries.forEachIndexed { idx, entry ->
                             Timber.i("  #${idx + 1}: ${entry.aid} (${entry.label}, priority ${entry.priority})")
                         }
@@ -1260,6 +1290,13 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             executionTimeMs = executionTime
         )
         apduLog = apduLog + apduEntry
+        
+        // PHASE 3: Store in session data for Room database
+        currentSessionData?.apduEntries?.add(apduEntry)
+        currentSessionData?.totalApdus = (currentSessionData?.totalApdus ?: 0) + 1
+        if (statusWord == "9000") {
+            currentSessionData?.successfulApdus = (currentSessionData?.successfulApdus ?: 0) + 1
+        }
     }
     
     /**
