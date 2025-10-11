@@ -14,6 +14,8 @@ import com.nfsp00f33r.app.hardware.HardwareDetectionService
 import com.nfsp00f33r.app.hardware.PN532Manager
 import com.nfsp00f33r.app.storage.CardDataStore
 import com.nfsp00f33r.app.storage.CardProfileAdapter
+import com.nfsp00f33r.app.storage.emv.EmvSessionDatabase
+import com.nfsp00f33r.app.storage.emv.EmvCardSessionEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -22,11 +24,11 @@ import timber.log.Timber
 
 /**
  * PRODUCTION-GRADE Dashboard ViewModel
- * Phase 1A: Now uses CardDataStore with encrypted persistence
+ * Phase 4: Migrated to EmvSessionDatabase (Room)
  * 
  * Provides LIVE DATA ONLY - no hardcoded fallbacks
  * Integrates with real hardware status and card profile data
- * All card data now persists with AES-256-GCM encryption
+ * All card data now persists with Room SQLite database
  * 
  * NO SAFE CALL OPERATORS - Production-grade error handling per framework standards
  */
@@ -43,8 +45,13 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
     // Permission manager for hardware access
     private var permissionManager: com.nfsp00f33r.app.permissions.PermissionManager? = null
     
-    // Card data store with encryption
-    private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
+    // PHASE 4: Room database for EMV sessions
+    private val emvSessionDatabase by lazy {
+        EmvSessionDatabase.getInstance(context)
+    }
+    private val emvSessionDao by lazy {
+        emvSessionDatabase.emvCardSessionDao()
+    }
     
     // EmulationModule for attack analytics - Phase 2B Quick Wins
     private val emulationModule by lazy {
@@ -296,39 +303,37 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
-     * Refresh card data from CardDataStore (encrypted storage)
+     * Refresh card data from EmvSessionDatabase (Room)
+     * PHASE 4: Now uses Room database instead of CardDataStore
      */
     private fun refreshCardData() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Load from encrypted storage
-                val storageProfiles = cardDataStore.getAllProfiles()
-                Timber.d("Loaded ${storageProfiles.size} profiles from encrypted storage")
-                val allProfiles = storageProfiles.map { CardProfileAdapter.toAppProfile(it) }
+                // PHASE 4: Load from Room database
+                val sessions = emvSessionDao.getAllSessions()
+                Timber.d("Loaded ${sessions.size} sessions from Room database")
                 
-                // Convert ONLY profiles with REAL data to VirtualCard format
-                recentCards = allProfiles.takeLast(3).mapNotNull { profile ->
-                    val emvData = profile.emvCardData
-                    
+                // Convert sessions to VirtualCard format for recent cards display
+                recentCards = sessions.takeLast(3).mapNotNull { session ->
                     // ONLY show cards with REAL extracted PAN data
-                    if (emvData.pan.isNullOrEmpty() || emvData.pan!!.length < 13) {
+                    if (session.pan.isNullOrEmpty() || session.pan.length < 13) {
                         return@mapNotNull null // Skip cards without real PAN
                     }
                     
                     VirtualCard(
-                        cardholderName = emvData.cardholderName?.takeIf { it.isNotBlank() } ?: "",
-                        maskedPan = emvData.getUnmaskedPan(),
-                        expiryDate = emvData.expiryDate?.takeIf { it.isNotBlank() } ?: "",
-                        apduCount = profile.apduLogs.size, // Use real APDU count
-                        cardType = if (emvData.pan!!.length >= 6) detectCardBrand(emvData.getUnmaskedPan()) else "",
-                        isEncrypted = emvData.hasEncryptedData(),
-                        lastUsed = formatRelativeTime(profile.createdAt.time),
-                        category = if (emvData.hasEncryptedData()) "EMV" else "BASIC"
+                        cardholderName = session.cardholderName?.takeIf { it.isNotBlank() } ?: "",
+                        maskedPan = session.pan,
+                        expiryDate = session.expiryDate?.takeIf { it.isNotBlank() } ?: "",
+                        apduCount = session.totalApdus,
+                        cardType = session.cardBrand ?: detectCardBrand(session.pan),
+                        isEncrypted = session.hasEncryptedData,
+                        lastUsed = formatRelativeTime(session.scanTimestamp),
+                        category = if (session.hasEncryptedData) "EMV" else "BASIC"
                     )
                 }.reversed() // Show most recent first
                 
-                // Calculate real statistics and update UI on Main thread
-                val newStats = calculateCardStatistics(allProfiles)
+                // Calculate real statistics using Room DAO queries
+                val newStats = calculateCardStatisticsFromRoom()
                 
                 withContext(Dispatchers.Main) {
                     cardStatistics = newStats
@@ -344,10 +349,12 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
-     * Calculate REAL card statistics from actual data ONLY - NO PLACEHOLDERS
+     * Calculate REAL card statistics from Room database using DAO queries
+     * PHASE 4: Uses efficient Room queries instead of loading all profiles
      */
-    private fun calculateCardStatistics(profiles: List<com.nfsp00f33r.app.models.CardProfile>): CardStatistics {
-        if (profiles.isEmpty()) {
+    private suspend fun calculateCardStatisticsFromRoom(): CardStatistics {
+        val totalCards = emvSessionDao.getSessionCount()
+        if (totalCards == 0) {
             // Return empty statistics - NO FAKE DATA
             return CardStatistics()
         }
@@ -355,50 +362,48 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
         val now = System.currentTimeMillis()
         val oneDayAgo = now - (24 * 60 * 60 * 1000)
         
-        // Count cards with REAL timestamps only
-        val cardsToday = profiles.count { profile ->
-            profile.createdAt.time > oneDayAgo
-        }
+        // Count cards scanned today using Room query
+        val cardsToday = emvSessionDao.getSessionsAfter(oneDayAgo).size
         
-        // Count only cards with REAL brand data extracted
-        val realBrands = profiles.mapNotNull { profile ->
-            val pan = profile.emvCardData.pan
-            if (!pan.isNullOrEmpty() && pan.length >= 6) {
-                detectCardBrand(profile.emvCardData.getUnmaskedPan())
-            } else null
-        }.distinct()
+        // Get unique brands from Room
+        val uniqueBrands = emvSessionDao.getAllCardBrands().size
         
-        val uniqueBrands = realBrands.size
+        // Get total APDU count (sum of totalApdus field)
+        val totalApduCommands = emvSessionDao.getTotalTagsScanned() ?: 0
+        val averageApduPerCard = if (totalCards > 0) totalApduCommands.toDouble() / totalCards else 0.0
         
-        // Count only REAL APDU commands from actual card communication
-        val totalApduCommands = profiles.sumOf { it.apduLogs.size }
-        val averageApduPerCard = if (profiles.isNotEmpty()) totalApduCommands.toDouble() / profiles.size else 0.0
-        
-        // Get REAL recent scan time from actual timestamps
-        val recentScanTime = if (profiles.isNotEmpty()) {
-            val mostRecent = profiles.maxByOrNull { it.createdAt.time }
-            if (mostRecent != null) formatRelativeTime(mostRecent.createdAt.time) else "Never"
+        // Get most recent session for time display
+        val recentSessions = emvSessionDao.getRecentSessions(1)
+        val recentScanTime = if (recentSessions.isNotEmpty()) {
+            formatRelativeTime(recentSessions[0].scanTimestamp)
         } else {
             "Never"
         }
         
-        // Count REAL security issues from actual EMV data analysis
-        val securityIssues = profiles.count { profile ->
-            val emvData = profile.emvCardData
-            // Only count as security issue if we have real data to analyze
-            (emvData.pan != null && !emvData.hasEncryptedData()) ||
-            (emvData.applicationCryptogram.isNullOrEmpty() && emvData.apduLog.isNotEmpty()) ||
-            (profile.apduLogs.size < 3 && emvData.pan != null)
+        // Count security issues (cards without encryption + error sessions)
+        val securityIssues = emvSessionDao.getSessionCount() - emvSessionDao.getEncryptedSessionCount() +
+                            emvSessionDao.getErrorSessionCount()
+        
+        // Get attack analytics from emulation module
+        val attackStats = try {
+            val report = emulationModule.getAnalyticsReport()
+            Triple(report.totalAttacks, report.totalSuccessful, report.overallSuccessRate)
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to load attack analytics")
+            Triple(0, 0, 0.0)
         }
         
         return CardStatistics(
-            totalCards = profiles.size,
+            totalCards = totalCards,
             cardsToday = cardsToday,
             uniqueBrands = uniqueBrands,
             totalApduCommands = totalApduCommands,
             averageApduPerCard = averageApduPerCard,
             recentScanTime = recentScanTime,
-            securityIssues = securityIssues
+            securityIssues = securityIssues,
+            totalAttackExecutions = attackStats.first,
+            successfulAttacks = attackStats.second,
+            overallSuccessRate = attackStats.third
         )
     }
     
@@ -530,7 +535,7 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
         if (service != null) {
             service.cleanup()
         }
-        // No cleanup needed for CardDataStore (managed by Application)
+        // No cleanup needed for EmvSessionDatabase (managed by Room singleton)
         
         Timber.d("DashboardViewModel cleared")
     }
