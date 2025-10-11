@@ -47,9 +47,15 @@ object EmvTlvParser {
         "84",  // DF Name - MIXED ITEM - Contains AID/DF Name directly, NOT nested tags
         "86",  // Issuer Script Command - BER_TLV ITEM but NOT recursive template
         "87",  // Application Priority Indicator - BER_TLV ITEM
+        "90",  // Issuer Public Key Certificate - BINARY ITEM - Raw RSA certificate bytes
+        "92",  // Issuer Public Key Remainder - BINARY ITEM - Raw RSA key remainder bytes
         "93",  // Signed Static Application Data - BINARY ITEM - Raw signature data
         "94",  // Application File Locator - BINARY ITEM - AFL records, not TLV
         "97",  // Transaction Certificate Data Object List (TDOL) - BER_TLV ITEM
+        "9F32", // Issuer Public Key Exponent - BINARY ITEM - Raw exponent bytes
+        "9F46", // ICC Public Key Certificate - BINARY ITEM - Raw RSA certificate bytes
+        "9F47", // ICC Public Key Exponent - BINARY ITEM - Raw exponent bytes
+        "9F48", // ICC Public Key Remainder - BINARY ITEM - Raw RSA key remainder bytes
         "5F50", // Issuer URL - TEXT ITEM
         "9F0B", // Cardholder Name Extended - TEXT ITEM
         "9F4B", // Signed Dynamic Application Data - BINARY ITEM - Raw signature bytes
