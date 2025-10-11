@@ -27,10 +27,14 @@ import java.util.Date
 import java.util.Locale
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
 import com.nfsp00f33r.app.cardreading.EmvTagDictionary
+import com.nfsp00f33r.app.cardreading.EnrichedTagData
+import com.nfsp00f33r.app.storage.emv.EmvSessionDatabase
+import java.util.UUID
 
 /**
  * PRODUCTION-GRADE Card Reading ViewModel
  * Phase 1A: Now uses CardDataStore with encrypted persistence
+ * Phase 3: Now collects complete EMV session data for Room database
  * 
  * Implements complete Proxmark3 Iceman EMV scan workflow:
  * - PPSE → AID Selection → GPO → Record Reading → PDOL/CDOL processing
@@ -66,13 +70,53 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val summary: String        // Human-readable summary
     )
     
+    /**
+     * PHASE 3: Session data collector
+     * Stores all EMV phase results during scan for Room database save
+     */
+    data class SessionScanData(
+        var sessionId: String = "",
+        var scanStartTime: Long = 0L,
+        var cardUid: String = "",
+        // Complete tag collection from all phases
+        val allTags: MutableMap<String, EnrichedTagData> = mutableMapOf(),
+        // APDU log entries
+        val apduEntries: MutableList<ApduLogEntry> = mutableListOf(),
+        // Phase-specific data
+        var ppseResponse: Map<String, EnrichedTagData>? = null,
+        val aidResponses: MutableList<Map<String, EnrichedTagData>> = mutableListOf(),
+        var gpoResponse: Map<String, EnrichedTagData>? = null,
+        val recordResponses: MutableList<Map<String, EnrichedTagData>> = mutableListOf(),
+        var cryptogramResponse: Map<String, EnrichedTagData>? = null,
+        var getDataResponse: Map<String, EnrichedTagData>? = null,
+        // Statistics
+        var totalApdus: Int = 0,
+        var successfulApdus: Int = 0,
+        var scanStatus: String = "IN_PROGRESS",
+        var errorMessage: String? = null
+    )
+    
     // Hardware and reader management - Phase 2B Day 1: Migrated to PN532DeviceModule
     private val pn532Module by lazy {
         NfSp00fApplication.getPN532Module()
     }
     
-    // Card data store with encryption
+    // Card data store with encryption (PHASE 7: Will be removed)
     private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
+    
+    // PHASE 3: Room database for EMV sessions
+    private val emvSessionDatabase by lazy {
+        EmvSessionDatabase.getInstance(context)
+    }
+    
+    private val emvSessionDao by lazy {
+        emvSessionDatabase.emvCardSessionDao()
+    }
+    
+    // PHASE 3: Current scan session tracking
+    private var currentSessionData: SessionScanData? = null
+    private var currentSessionId: String = ""
+    private var sessionStartTime: Long = 0L
     
     // Reader types available
     enum class ReaderType {
