@@ -1020,17 +1020,25 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 
                 when (realStatusWord) {
                     "9000" -> {
+                        // PHASE 3D: Parse GENERATE AC response with unified parser
+                        val generateAcBytes = generateAcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        val cryptogramParseResult = EmvTlvParser.parseResponse(generateAcBytes, "GENERATE_AC")
+                        
+                        // Store parsed cryptogram data in session
+                        currentSessionData?.cryptogramResponse = cryptogramParseResult.tags
+                        currentSessionData?.allTags?.putAll(cryptogramParseResult.tags)
+                        
                         displayParsedData("GENERATE_AC", generateAcHex)
                         
-                        // Extract cryptogram data
-                        val arqc = extractCryptogramFromAllResponses(apduLog)
-                        val cid = extractCidFromAllResponses(apduLog)
-                        val atc = extractAtcFromAllResponses(apduLog)
+                        // Extract cryptogram data from parsed tags
+                        val arqc = cryptogramParseResult.tags["9F26"]?.value ?: ""
+                        val cid = cryptogramParseResult.tags["9F27"]?.value ?: ""
+                        val atc = cryptogramParseResult.tags["9F36"]?.value ?: ""
                         
                         withContext(Dispatchers.Main) {
                             statusMessage = "GENERATE AC Success: ARQC=$arqc CID=$cid ATC=$atc"
                         }
-                        Timber.i("GENERATE AC successful - ARQC: $arqc, CID: $cid, ATC: $atc")
+                        Timber.i("PHASE 3D: GENERATE AC parsed ${cryptogramParseResult.tags.size} tags - ARQC: $arqc, CID: $cid, ATC: $atc")
                     }
                     "6985" -> {
                         statusMessage = "GENERATE AC Failed: Conditions not satisfied"
@@ -1087,21 +1095,31 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     
                     when (realStatusWord) {
                         "9000" -> {
+                            // PHASE 3D: Parse GET DATA response with unified parser
+                            val getDataBytes = getDataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val getDataParseResult = EmvTlvParser.parseResponse(getDataBytes, "GET_DATA", tag)
+                            
+                            // Store in session (merge with existing getDataResponse)
+                            if (currentSessionData?.getDataResponse == null) {
+                                currentSessionData?.getDataResponse = getDataParseResult.tags
+                            } else {
+                                currentSessionData?.getDataResponse = currentSessionData?.getDataResponse!! + getDataParseResult.tags
+                            }
+                            currentSessionData?.allTags?.putAll(getDataParseResult.tags)
+                            
                             displayParsedData("GET_DATA_$tag", getDataHex)
                             getDataSuccessCount++
                             
-                            // Parse specific tag data
-                            val dataOnly = if (getDataHex.length > 4) getDataHex.dropLast(4) else ""
+                            // Log extracted tag data
+                            val tagData = getDataParseResult.tags[tag]
                             when (tag) {
-                                "9F36" -> Timber.i("✓ ATC (9F36): $dataOnly")
-                                "9F13" -> Timber.i("✓ Last Online ATC (9F13): $dataOnly")
-                                "9F17" -> Timber.i("✓ PIN Try Counter (9F17): $dataOnly")
-                                "9F4D" -> Timber.i("✓ Log Entry (9F4D): $dataOnly")
-                                "9F4F" -> {
-                                    Timber.i("✓ Log Format (9F4F): $dataOnly")
-                                    // PHASE 5 prep: Store for transaction log reading
-                                }
+                                "9F36" -> Timber.i("✓ ATC (9F36): ${tagData?.value ?: "N/A"}")
+                                "9F13" -> Timber.i("✓ Last Online ATC (9F13): ${tagData?.value ?: "N/A"}")
+                                "9F17" -> Timber.i("✓ PIN Try Counter (9F17): ${tagData?.value ?: "N/A"}")
+                                "9F4D" -> Timber.i("✓ Log Entry (9F4D): ${tagData?.value ?: "N/A"}")
+                                "9F4F" -> Timber.i("✓ Log Format (9F4F): ${tagData?.value ?: "N/A"}")
                             }
+                            Timber.d("PHASE 3D: GET DATA $tag parsed ${getDataParseResult.tags.size} tags")
                         }
                         "6A88" -> Timber.w("✗ Tag $tag: Referenced data not found")
                         "6A81" -> Timber.w("✗ Tag $tag: Function not supported")
@@ -1242,9 +1260,12 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             Timber.e(e, "PHASE 9: JSON export failed")
         }
         
-        // Auto-save to database
-        delay(1000)
-        saveCardProfile(extractedData)
+        // PHASE 3E: Save complete session to Room database
+        delay(500)
+        saveSessionToDatabase()
+        
+        // OLD: Auto-save to CardDataStore (PHASE 7: Will be removed)
+        // saveCardProfile(extractedData)
         
         // Load saved data from database to display (fixes tag display issues)
         withContext(Dispatchers.Main) {
@@ -3386,10 +3407,115 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         )
     }
     
+    /**
+     * PHASE 3E: Save complete EMV session to Room database
+     */
+    private suspend fun saveSessionToDatabase() {
+        val sessionData = currentSessionData ?: run {
+            Timber.w("PHASE 3E: No session data to save")
+            return
+        }
+        
+        try {
+            val scanDuration = System.currentTimeMillis() - sessionStartTime
+            sessionData.scanStatus = "COMPLETED"
+            
+            // Extract key fields from all collected tags
+            val allTags = sessionData.allTags
+            val pan = allTags["5A"]?.value ?: ""
+            val maskedPan = if (pan.length > 10) "${pan.take(6)}****${pan.takeLast(4)}" else pan
+            val expiryDate = allTags["5F24"]?.valueDecoded
+            val cardholderName = allTags["5F20"]?.valueDecoded
+            val cardBrand = allTags["50"]?.valueDecoded ?: "Unknown"
+            val appLabel = allTags["50"]?.valueDecoded
+            val appId = allTags["4F"]?.value
+            val aip = allTags["82"]?.value
+            val arqc = allTags["9F26"]?.value
+            val tc = allTags["9F61"]?.value
+            val cid = allTags["9F27"]?.value
+            val atc = allTags["9F36"]?.value
+            
+            // Parse AIP for capabilities
+            val hasSda = aip?.let { EmvTlvParser.parseAip(it)?.sdaSupported } ?: false
+            val hasDda = aip?.let { EmvTlvParser.parseAip(it)?.ddaSupported } ?: false
+            val hasCda = aip?.let { EmvTlvParser.parseAip(it)?.cdaSupported } ?: false
+            val supportsCvm = aip?.let { EmvTlvParser.parseAip(it)?.cardholderVerificationSupported } ?: false
+            
+            // Check ROCA vulnerability (from existing ViewModel state)
+            val rocaVulnerable = isRocaVulnerable
+            val rocaKeyModulus = if (rocaVulnerable) allTags.values.firstOrNull { it.name.contains("Modulus", ignoreCase = true) }?.value else null
+            
+            // Build entity
+            val entity = com.nfsp00f33r.app.storage.emv.EmvCardSessionEntity(
+                sessionId = sessionData.sessionId,
+                scanTimestamp = sessionData.scanStartTime,
+                scanDuration = scanDuration,
+                scanStatus = sessionData.scanStatus,
+                errorMessage = sessionData.errorMessage,
+                cardUid = sessionData.cardUid,
+                pan = pan.ifEmpty { null },
+                maskedPan = maskedPan.ifEmpty { null },
+                expiryDate = expiryDate,
+                cardholderName = cardholderName,
+                cardBrand = cardBrand,
+                applicationLabel = appLabel,
+                applicationIdentifier = appId,
+                aip = aip,
+                hasSda = hasSda,
+                hasDda = hasDda,
+                hasCda = hasCda,
+                supportsCvm = supportsCvm,
+                arqc = arqc,
+                tc = tc,
+                cid = cid,
+                atc = atc,
+                rocaVulnerable = rocaVulnerable,
+                rocaKeyModulus = rocaKeyModulus,
+                hasEncryptedData = allTags.any { it.key in listOf("86", "9F26", "9F27") },
+                allEmvTags = allTags,
+                apduLog = sessionData.apduEntries.map { apdu ->
+                    com.nfsp00f33r.app.storage.emv.ApduLogEntry(
+                        sequence = sessionData.apduEntries.indexOf(apdu) + 1,
+                        command = apdu.command,
+                        response = apdu.response,
+                        statusWord = apdu.statusWord,
+                        phase = apdu.description.substringBefore(" -").substringBefore(":"),
+                        description = apdu.description,
+                        timestamp = System.currentTimeMillis(), // Use current time since old timestamp is string format
+                        executionTime = apdu.executionTimeMs,
+                        isSuccess = apdu.statusWord == "9000"
+                    )
+                },
+                ppseData = null, // TODO: Build structured phase data
+                aidsData = emptyList(),
+                gpoData = null,
+                recordsData = emptyList(),
+                cryptogramData = null,
+                totalApdus = sessionData.totalApdus,
+                totalTags = allTags.size,
+                recordCount = sessionData.recordResponses.size
+            )
+            
+            // Insert into database
+            withContext(Dispatchers.IO) {
+                emvSessionDao.insert(entity)
+                Timber.i("PHASE 3E: Session ${sessionData.sessionId} saved to Room database")
+                Timber.i("  - ${allTags.size} total tags")
+                Timber.i("  - ${sessionData.totalApdus} APDUs (${sessionData.successfulApdus} successful)")
+                Timber.i("  - ${sessionData.recordResponses.size} records")
+                Timber.i("  - Scan duration: ${scanDuration}ms")
+            }
+            
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 3E: Failed to save session to database")
+            sessionData.scanStatus = "ERROR"
+            sessionData.errorMessage = e.message
+        }
+    }
 
     
     /**
-     * Save card profile to database
+     * Save card profile to database (PHASE 7: Will be removed)
      */
     private fun saveCardProfile(emvData: com.nfsp00f33r.app.data.EmvCardData) {
         try {
