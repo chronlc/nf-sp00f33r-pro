@@ -5,9 +5,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.content.Context
 import com.nfsp00f33r.app.application.NfSp00fApplication
 import com.nfsp00f33r.app.storage.CardDataStore
 import com.nfsp00f33r.app.storage.CardProfileAdapter
+import com.nfsp00f33r.app.storage.emv.EmvSessionDatabase
+import com.nfsp00f33r.app.storage.emv.EmvCardSessionEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -20,14 +23,23 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Database Screen ViewModel - Phase 1A: Now uses CardDataStore with encrypted persistence
- * Migrated from in-memory CardProfileManager to encrypted CardDataStore
- * All data now persists across app restarts with AES-256-GCM encryption
+ * Database Screen ViewModel - Phase 4: Now uses EmvSessionDatabase with Room
+ * Migrated from CardDataStore to EmvSessionDatabase (single table design)
+ * All EMV session data stored in SQLite with 200+ tags per session
  */
-class DatabaseViewModel : ViewModel() {
+class DatabaseViewModel(private val context: Context) : ViewModel() {
     
-    // Card data storage (Phase 2A: Using CardDataStoreModule)
-    private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
+    // PHASE 4: Room database for EMV sessions
+    private val emvSessionDatabase by lazy {
+        EmvSessionDatabase.getInstance(context)
+    }
+    
+    private val emvSessionDao by lazy {
+        emvSessionDatabase.emvCardSessionDao()
+    }
+    
+    // OLD: Card data storage (PHASE 7: Will be removed)
+    // private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
     
     // ROCA vulnerability scanner - Phase 2B Quick Wins
     private val rocaScanner = com.nfsp00f33r.app.security.roca.RocaBatchScanner()
@@ -69,26 +81,50 @@ class DatabaseViewModel : ViewModel() {
     }
     
     /**
-     * Refresh data from CardDataStore (encrypted persistent storage)
+     * PHASE 4: Refresh data from EmvSessionDatabase (Room SQLite)
      */
     private fun refreshData() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Get all profiles from encrypted storage
-                val storageProfiles = cardDataStore.getAllProfiles()
+                // Get all sessions from Room database
+                val sessions = emvSessionDao.getAllSessions()
                 
-                // Convert to app profiles using adapter
-                val appProfiles = storageProfiles.map { CardProfileAdapter.toAppProfile(it) }
+                // Convert EmvCardSessionEntity to CardProfile for UI compatibility
+                val appProfiles = sessions.map { session ->
+                    CardProfile(
+                        emvCardData = com.nfsp00f33r.app.data.EmvCardData(
+                            pan = session.pan ?: "",
+                            expiryDate = session.expiryDate ?: "",
+                            cardholderName = session.cardholderName ?: "",
+                            applicationLabel = session.applicationLabel ?: "",
+                            applicationIdentifier = session.applicationIdentifier ?: "",
+                            emvTags = session.allEmvTags.mapValues { it.value.valueDecoded ?: it.value.value },
+                            apduLog = session.apduLog.map { apdu ->
+                                com.nfsp00f33r.app.data.ApduLogEntry(
+                                    timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(apdu.timestamp)),
+                                    command = apdu.command,
+                                    response = apdu.response,
+                                    statusWord = apdu.statusWord,
+                                    description = apdu.description,
+                                    executionTimeMs = apdu.executionTime
+                                )
+                            }
+                        ),
+                        apduLogs = mutableListOf(),
+                        cardholderName = session.cardholderName,
+                        aid = session.applicationIdentifier
+                    )
+                }
                 
                 // Update UI state on main thread
                 withContext(Dispatchers.Main) {
                     cardProfiles = appProfiles
                     updateStatistics()
                     filterCards(searchQuery)
-                    Timber.d("Database refreshed from encrypted storage - Total cards: ${cardProfiles.size}")
+                    Timber.d("PHASE 4: Database refreshed from Room - Total sessions: ${cardProfiles.size}")
                 }
             } catch (e: Exception) {
-                Timber.e(e, "Failed to refresh data from encrypted storage")
+                Timber.e(e, "PHASE 4: Failed to refresh data from Room database")
             }
         }
     }
@@ -142,32 +178,28 @@ class DatabaseViewModel : ViewModel() {
     }
     
     /**
-     * Delete card profile by ID from encrypted storage
+     * PHASE 4: Delete session by ID from Room database
      */
     fun deleteCard(cardId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val success = cardDataStore.deleteProfile(cardId)
-                if (success) {
-                    Timber.d("Card deleted from encrypted storage: $cardId")
-                    // Refresh data from storage
-                    refreshData()
-                } else {
-                    Timber.w("Failed to delete card: $cardId")
-                }
+                emvSessionDao.deleteById(cardId)
+                Timber.d("PHASE 4: Session deleted from Room: $cardId")
+                // Refresh data from database
+                refreshData()
             } catch (e: Exception) {
-                Timber.e(e, "Error deleting card: $cardId")
+                Timber.e(e, "PHASE 4: Error deleting session: $cardId")
             }
         }
     }
     
     /**
-     * Export all card data to JSON from encrypted storage
+     * Export all card data to JSON (PHASE 5: Will be replaced with Proxmark3 JSON export)
      */
     fun exportToJson(): String {
         return try {
-            val storageProfiles = cardDataStore.getAllProfiles()
-            val appProfiles = storageProfiles.map { CardProfileAdapter.toAppProfile(it) }
+            // TODO PHASE 5: Use EmvSessionExporter.toProxmark3Json()
+            val appProfiles = cardProfiles
             
             // Create JSON export
             val profiles = appProfiles.map { profile ->
@@ -190,16 +222,14 @@ class DatabaseViewModel : ViewModel() {
     }
     
     /**
-     * Clear all card data from encrypted storage
+     * Delete all cards from encrypted storage
      */
     fun clearAllCards() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val allProfiles = cardDataStore.getAllProfiles()
-                allProfiles.forEach { profile ->
-                    cardDataStore.deleteProfile(profile.profileId)
-                }
-                Timber.d("All cards cleared from encrypted storage")
+                // PHASE 4: Use Room DAO to clear all sessions
+                emvSessionDao.deleteAll()
+                Timber.d("All cards cleared from database")
                 // Refresh data from storage
                 refreshData()
             } catch (e: Exception) {
@@ -249,11 +279,9 @@ class DatabaseViewModel : ViewModel() {
     fun exportCardData(callback: (Boolean, String) -> Unit) {
         viewModelScope.launch {
             try {
-                // Get profiles from encrypted storage
-                val storageProfiles = withContext(Dispatchers.IO) {
-                    cardDataStore.getAllProfiles()
-                }
-                val profiles = storageProfiles.map { CardProfileAdapter.toAppProfile(it) }
+                // PHASE 4: Use cardProfiles already loaded from Room (refreshData())
+                // TODO PHASE 5: Replace with EmvSessionExporter.toProxmark3Json()
+                val profiles = cardProfiles
                 val jsonArray = JSONArray()
                 
                 profiles.forEach { profile ->
@@ -329,17 +357,47 @@ class DatabaseViewModel : ViewModel() {
                             applicationIdentifier = jsonProfile.optString("aid")
                         )
                         
-                        val cardProfile = com.nfsp00f33r.app.models.CardProfile(
-                            emvCardData = emvData,
-                            apduLogs = mutableListOf(),
+                        // PHASE 4: Create EmvCardSessionEntity for Room
+                        // Import creates minimal entity with basic card info
+                        val entity = EmvCardSessionEntity(
+                            sessionId = jsonProfile.optString("id"),
+                            scanTimestamp = jsonProfile.optLong("createdAt"),
+                            scanDuration = 0L,
+                            scanStatus = "IMPORTED",
+                            errorMessage = null,
+                            cardUid = emvData.cardUid ?: "",
+                            pan = emvData.pan,
+                            maskedPan = emvData.pan?.take(6) + "******" + emvData.pan?.takeLast(4),
+                            expiryDate = emvData.expiryDate,
                             cardholderName = emvData.cardholderName,
-                            aid = emvData.applicationIdentifier,
-                            createdAt = Date(jsonProfile.optLong("createdAt"))
+                            cardBrand = null,
+                            applicationLabel = null,
+                            applicationIdentifier = emvData.applicationIdentifier,
+                            aip = null,
+                            hasSda = false,
+                            hasDda = false,
+                            hasCda = false,
+                            supportsCvm = false,
+                            arqc = null,
+                            tc = null,
+                            cid = null,
+                            atc = null,
+                            rocaVulnerable = false,
+                            rocaKeyModulus = null,
+                            hasEncryptedData = false,
+                            allEmvTags = emptyMap(),
+                            apduLog = emptyList(),
+                            ppseData = null,
+                            aidsData = emptyList(),
+                            gpoData = null,
+                            recordsData = emptyList(),
+                            cryptogramData = null,
+                            totalApdus = 0,
+                            totalTags = 0,
+                            recordCount = 0
                         )
                         
-                        // Convert to storage profile and save with encryption
-                        val storageProfile = CardProfileAdapter.toStorageProfile(cardProfile)
-                        cardDataStore.storeProfile(storageProfile)
+                        emvSessionDao.insert(entity)
                         importedCount++
                     }
                     
