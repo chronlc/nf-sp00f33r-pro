@@ -25,10 +25,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nfsp00f33r.app.components.VirtualCardView
 import com.nfsp00f33r.app.ui.components.RocaVulnerabilityCard
-import com.nfsp00f33r.app.ui.components.RocaVulnerabilityBadge
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
 import com.nfsp00f33r.app.cardreading.EmvTagDictionary
-import kotlinx.coroutines.delay
+import com.nfsp00f33r.app.ui.theme.CardReadingColors
+import com.nfsp00f33r.app.ui.theme.CardReadingSpacing
+import com.nfsp00f33r.app.ui.theme.CardReadingRadius
+import com.nfsp00f33r.app.ui.theme.CardReadingDimensions
 
 /**
  * SLEEK DATA-FOCUSED EMV Card Reading Screen
@@ -38,68 +40,46 @@ import kotlinx.coroutines.delay
 fun CardReadingScreen() {
     val context = LocalContext.current
     
-    // Defer ViewModel creation to avoid blocking main thread during navigation
+    // ViewModel creation
     val viewModel: CardReadingViewModel = remember {
         CardReadingViewModel.Factory(context).create(CardReadingViewModel::class.java)
-    }
-    
-    // Defer heavy UI rendering until after first frame
-    var isInitialized by remember { mutableStateOf(false) }
-    
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(50) // Let initial frame render first
-        isInitialized = true
     }
     
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0A0A0A))
+            .background(CardReadingColors.Background)
     ) {
-        if (!isInitialized) {
-            // Fast loading state
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "Loading...",
-                    color = Color(0xFF00FF41),
-                    fontSize = 16.sp
-                )
-            }
-        } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(12.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(CardReadingSpacing.Medium)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
+        ) {
                 // Data-focused status header
                 StatusHeaderCard(viewModel)
                 
                 // Compact control panel
                 ControlPanelCard(viewModel)
                 
-                // ROCA Vulnerability Status
-                if (viewModel.rocaVulnerabilityStatus != null) {
-                    RocaVulnerabilityStatusCard(viewModel)
-                }
-                
-                // Large data display area
-                if (viewModel.scannedCards.isNotEmpty()) {
-                    ActiveCardsSection(viewModel)
-                }
-                
-                // Real-time EMV data display
-                if (viewModel.parsedEmvFields.isNotEmpty()) {
-                    EmvDataDisplaySection(viewModel)
-                }
-                
-                // Terminal-style APDU log
-                ApduTerminalSection(viewModel)
+            // ROCA Vulnerability Status
+            if (viewModel.rocaVulnerabilityStatus != null) {
+                RocaVulnerabilityStatusCard(viewModel)
             }
+            
+            // Large data display area
+            if (viewModel.scannedCards.isNotEmpty()) {
+                ActiveCardsSection(viewModel)
+            }
+            
+            // Real-time EMV data display
+            if (viewModel.parsedEmvFields.isNotEmpty()) {
+                EmvDataDisplaySection(viewModel)
+            }
+            
+            // Terminal-style APDU log
+            ApduTerminalSection(viewModel)
         }
     }
 }
@@ -108,13 +88,13 @@ fun CardReadingScreen() {
 private fun StatusHeaderCard(viewModel: CardReadingViewModel) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1419)),
-        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = CardReadingColors.CardBackground),
+        shape = RoundedCornerShape(CardReadingRadius.Large),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier.padding(CardReadingSpacing.Large),
+            verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
         ) {
             // Header Row
             Row(
@@ -122,34 +102,32 @@ private fun StatusHeaderCard(viewModel: CardReadingViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "EMV CARD SCANNER",
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.Bold
-                    ),
-                    color = Color(0xFF00FF41)
-                )
-                
-                // Reader Status Chip
+            Text(
+                "EMV CARD SCANNER",
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontWeight = FontWeight.Bold
+                ),
+                color = CardReadingColors.SuccessGreen
+            )                // Reader Status Chip
                 Surface(
-                    color = if (viewModel.selectedReader != null) Color(0xFF1B4332) else Color(0xFF4A1A1A),
-                    shape = RoundedCornerShape(16.dp)
+                    color = if (viewModel.selectedReader != null) CardReadingColors.SafeBackground else CardReadingColors.VulnerableBackground,
+                    shape = RoundedCornerShape(CardReadingRadius.ExtraLarge)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = CardReadingSpacing.Medium, vertical = CardReadingSpacing.Small / 2),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small / 2)
                     ) {
                         Icon(
                             if (viewModel.selectedReader != null) Icons.Default.CheckCircle else Icons.Default.Error,
                             contentDescription = "Reader Status",
-                            tint = if (viewModel.selectedReader != null) Color(0xFF00FF41) else Color(0xFFFF6B6B),
+                            tint = if (viewModel.selectedReader != null) CardReadingColors.SuccessGreen else CardReadingColors.BrightRed,
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
                             viewModel.selectedReader?.let { viewModel.getReaderDisplayName(it) } ?: "No Reader",
                             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                            color = if (viewModel.selectedReader != null) Color(0xFF00FF41) else Color(0xFFFF6B6B)
+                            color = if (viewModel.selectedReader != null) CardReadingColors.SuccessGreen else CardReadingColors.BrightRed
                         )
                     }
                 }
@@ -160,24 +138,24 @@ private fun StatusHeaderCard(viewModel: CardReadingViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                DataStat("State", viewModel.scanState.name, Color(0xFF00FF41))
-                DataStat("Cards", "${viewModel.scannedCards.size}", Color(0xFF4FC3F7))
-                DataStat("APDUs", "${viewModel.apduLog.size}", Color(0xFFFFB74D))
-                DataStat("NFC", if (com.nfsp00f33r.app.activities.MainActivity.currentNfcTag != null) "DETECTED" else "WAITING", 
-                    if (com.nfsp00f33r.app.activities.MainActivity.currentNfcTag != null) Color(0xFF4CAF50) else Color(0xFFE1BEE7))
-                // ROCA vulnerability status
-                DataStat(
-                    "ROCA",
-                    if (viewModel.isRocaVulnerable) "VULN" else if (viewModel.rocaVulnerabilityStatus != "Not checked") "SAFE" else "N/A",
-                    if (viewModel.isRocaVulnerable) Color(0xFFF44336) else if (viewModel.rocaVulnerabilityStatus != "Not checked") Color(0xFF4CAF50) else Color(0xFF666666)
-                )
+                DataStat("State", viewModel.scanState.name, CardReadingColors.SuccessGreen)
+            DataStat("Cards", "${viewModel.scannedCards.size}", CardReadingColors.LightBlue)
+            DataStat("APDUs", "${viewModel.apduLog.size}", CardReadingColors.WarningOrange)
+            DataStat("NFC", if (com.nfsp00f33r.app.activities.MainActivity.currentNfcTag != null) "DETECTED" else "WAITING", 
+                if (com.nfsp00f33r.app.activities.MainActivity.currentNfcTag != null) CardReadingColors.BrightGreen else CardReadingColors.Purple)
+            // ROCA vulnerability status
+            DataStat(
+                "ROCA",
+                if (viewModel.isRocaVulnerable) "VULN" else if (viewModel.rocaVulnerabilityStatus != "Not checked") "SAFE" else "N/A",
+                if (viewModel.isRocaVulnerable) CardReadingColors.DangerRed else if (viewModel.rocaVulnerabilityStatus != "Not checked") CardReadingColors.BrightGreen else CardReadingColors.TextTertiary
+            )
             }
             
             // NFC Debug Info
             Text(
                 com.nfsp00f33r.app.activities.MainActivity.nfcDebugMessage,
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF888888),
+                color = CardReadingColors.TextSecondary,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -197,7 +175,7 @@ private fun DataStat(label: String, value: String, color: Color) {
         Text(
             label,
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF888888)
+            color = CardReadingColors.TextSecondary
         )
     }
 }
@@ -206,43 +184,43 @@ private fun DataStat(label: String, value: String, color: Color) {
 private fun ControlPanelCard(viewModel: CardReadingViewModel) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1419)),
-        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = CardReadingColors.CardBackground),
+        shape = RoundedCornerShape(CardReadingRadius.Large),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            modifier = Modifier.padding(CardReadingSpacing.Large),
+            verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Large)
         ) {
             // Reader & Technology Selection Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
             ) {
                 // Reader Selection
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small / 2)
                 ) {
                     Text(
                         "READER",
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontWeight = FontWeight.Bold
                         ),
-                        color = Color(0xFF888888)
+                        color = CardReadingColors.TextSecondary
                     )
                     
                     var readerExpanded by remember { mutableStateOf(false) }
                     Box {
                         OutlinedButton(
                             onClick = { readerExpanded = true },
-                            modifier = Modifier.fillMaxWidth().height(36.dp),
+                            modifier = Modifier.fillMaxWidth().height(CardReadingDimensions.ButtonHeightSmall),
                             colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = Color(0xFF1A1F2E),
-                                contentColor = Color(0xFFFFFFFF)
+                                containerColor = CardReadingColors.ButtonBackground,
+                                contentColor = CardReadingColors.TextPrimary
                             ),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF333333)),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                            border = androidx.compose.foundation.BorderStroke(1.dp, CardReadingColors.BorderDark),
+                            contentPadding = PaddingValues(horizontal = CardReadingSpacing.Medium, vertical = 0.dp)
                         ) {
                             Text(
                                 viewModel.selectedReader?.let { viewModel.getReaderDisplayName(it) } ?: "Select Reader",
@@ -254,14 +232,14 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
                         DropdownMenu(
                             expanded = readerExpanded,
                             onDismissRequest = { readerExpanded = false },
-                            modifier = Modifier.background(Color(0xFF1A1F2E))
+                            modifier = Modifier.background(CardReadingColors.ButtonBackground)
                         ) {
                             viewModel.availableReaders.forEach { reader ->
                                 DropdownMenuItem(
                                     text = { 
                                         Text(
                                             viewModel.getReaderDisplayName(reader),
-                                            color = Color(0xFFFFFFFF),
+                                            color = CardReadingColors.TextPrimary,
                                             style = MaterialTheme.typography.bodySmall
                                         ) 
                                     },
@@ -278,27 +256,27 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
                 // Technology Selection
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small / 2)
                 ) {
                     Text(
                         "PROTOCOL",
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontWeight = FontWeight.Bold
                         ),
-                        color = Color(0xFF888888)
+                        color = CardReadingColors.TextSecondary
                     )
                     
                     var techExpanded by remember { mutableStateOf(false) }
                     Box {
                         OutlinedButton(
                             onClick = { techExpanded = true },
-                            modifier = Modifier.fillMaxWidth().height(36.dp),
+                            modifier = Modifier.fillMaxWidth().height(CardReadingDimensions.ButtonHeightSmall),
                             colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = Color(0xFF1A1F2E),
-                                contentColor = Color(0xFFFFFFFF)
+                                containerColor = CardReadingColors.ButtonBackground,
+                                contentColor = CardReadingColors.TextPrimary
                             ),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF333333)),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                            border = androidx.compose.foundation.BorderStroke(1.dp, CardReadingColors.BorderDark),
+                            contentPadding = PaddingValues(horizontal = CardReadingSpacing.Medium, vertical = 0.dp)
                         ) {
                             Text(
                                 when (viewModel.selectedTechnology) {
@@ -314,14 +292,14 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
                         DropdownMenu(
                             expanded = techExpanded,
                             onDismissRequest = { techExpanded = false },
-                            modifier = Modifier.background(Color(0xFF1A1F2E))
+                            modifier = Modifier.background(CardReadingColors.ButtonBackground)
                         ) {
                             listOf("EMV/ISO-DEP", "Auto-Detect").forEach { tech ->
                                 DropdownMenuItem(
                                     text = { 
                                         Text(
                                             tech,
-                                            color = Color(0xFFFFFFFF),
+                                            color = CardReadingColors.TextPrimary,
                                             style = MaterialTheme.typography.bodySmall
                                         ) 
                                     },
@@ -341,9 +319,9 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
             
             // Compact Scan Button
             val scanButtonColor = when (viewModel.scanState) {
-                CardReadingViewModel.ScanState.SCANNING -> Color(0xFFFF1744)
-                CardReadingViewModel.ScanState.IDLE -> Color(0xFF00FF41)
-                else -> Color(0xFF666666)
+                CardReadingViewModel.ScanState.SCANNING -> CardReadingColors.ErrorRed
+                CardReadingViewModel.ScanState.IDLE -> CardReadingColors.SuccessGreen
+                else -> CardReadingColors.TextTertiary
             }
             
             val scanButtonText = when (viewModel.scanState) {
@@ -362,16 +340,16 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(40.dp),
+                    .height(CardReadingDimensions.ButtonHeightMedium),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = scanButtonColor
                 ),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp)
+                shape = RoundedCornerShape(CardReadingRadius.Medium),
+                contentPadding = PaddingValues(horizontal = CardReadingSpacing.Large, vertical = 0.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small)
                 ) {
                     Icon(
                         if (viewModel.scanState == CardReadingViewModel.ScanState.SCANNING) 
@@ -379,12 +357,12 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
                         else 
                             Icons.Default.PlayArrow,
                         contentDescription = scanButtonText,
-                        tint = Color(0xFF0A0A0A),
+                        tint = CardReadingColors.Background,
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
                         scanButtonText,
-                        color = Color(0xFF0A0A0A),
+                        color = CardReadingColors.Background,
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold
                         )
@@ -396,7 +374,7 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
             if (viewModel.statusMessage.isNotEmpty()) {
                 Text(
                     viewModel.statusMessage,
-                    color = Color(0xFF888888),
+                    color = CardReadingColors.TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
@@ -412,19 +390,19 @@ private fun RocaVulnerabilityStatusCard(viewModel: CardReadingViewModel) {
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = if (viewModel.isRocaVulnerable) {
-                Color(0xFF4A1A1A) // Dark red for vulnerable
+                CardReadingColors.VulnerableBackground // Dark red for vulnerable
             } else {
-                Color(0xFF1B4332) // Dark green for safe
+                CardReadingColors.SafeBackground // Dark green for safe
             }
         ),
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(CardReadingRadius.Large),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(CardReadingSpacing.Large),
+            horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -435,11 +413,11 @@ private fun RocaVulnerabilityStatusCard(viewModel: CardReadingViewModel) {
                 },
                 contentDescription = "ROCA Status",
                 tint = if (viewModel.isRocaVulnerable) {
-                    Color(0xFFFF6B6B) // Bright red
+                    CardReadingColors.BrightRed // Bright red
                 } else {
-                    Color(0xFF00FF41) // Bright green
+                    CardReadingColors.SuccessGreen // Bright green
                 },
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(CardReadingSpacing.Huge)
             )
             
             Column(
@@ -450,7 +428,7 @@ private fun RocaVulnerabilityStatusCard(viewModel: CardReadingViewModel) {
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontWeight = FontWeight.Bold
                     ),
-                    color = Color(0xFF888888)
+                    color = CardReadingColors.TextSecondary
                 )
                 Text(
                     viewModel.rocaVulnerabilityStatus ?: "",
@@ -458,9 +436,9 @@ private fun RocaVulnerabilityStatusCard(viewModel: CardReadingViewModel) {
                         fontWeight = FontWeight.Bold
                     ),
                     color = if (viewModel.isRocaVulnerable) {
-                        Color(0xFFFF6B6B)
+                        CardReadingColors.BrightRed
                     } else {
-                        Color(0xFF00FF41)
+                        CardReadingColors.SuccessGreen
                     }
                 )
             }
@@ -471,19 +449,19 @@ private fun RocaVulnerabilityStatusCard(viewModel: CardReadingViewModel) {
 @Composable
 private fun ActiveCardsSection(viewModel: CardReadingViewModel) {
     Column(
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
     ) {
         Text(
             "ACTIVE CARDS (${viewModel.scannedCards.size})",
             style = MaterialTheme.typography.labelLarge.copy(
                 fontWeight = FontWeight.Bold
             ),
-            color = Color(0xFF00FF41)
+            color = CardReadingColors.SuccessGreen
         )
         
         LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(horizontal = 4.dp)
+            horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Large),
+            contentPadding = PaddingValues(horizontal = CardReadingSpacing.Tiny)
         ) {
             items(viewModel.scannedCards) { card ->
                 VirtualCardView(card = card)
@@ -492,11 +470,11 @@ private fun ActiveCardsSection(viewModel: CardReadingViewModel) {
         
         // Pagination indicator if more than 3 cards
         if (viewModel.scannedCards.size > 3) {
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(CardReadingSpacing.Small))
             Text(
                 "${viewModel.scannedCards.size} cards scanned - scroll to view all",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF666666),
+                color = CardReadingColors.TextTertiary,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             )
         }
@@ -507,13 +485,13 @@ private fun ActiveCardsSection(viewModel: CardReadingViewModel) {
 private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1419)),
-        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = CardReadingColors.CardBackground),
+        shape = RoundedCornerShape(CardReadingRadius.Large),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier.padding(CardReadingSpacing.Large),
+            verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -525,17 +503,17 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                     style = MaterialTheme.typography.labelLarge.copy(
                         fontWeight = FontWeight.Bold
                     ),
-                    color = Color(0xFF00FF41)
+                    color = CardReadingColors.SuccessGreen
                 )
                 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small)
                 ) {
                     Text(
                         "${viewModel.apduLog.size} cmds",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF666666)
+                        color = CardReadingColors.TextTertiary
                     )
 
                 }
@@ -545,12 +523,12 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(300.dp)
+                    .height(CardReadingDimensions.TerminalHeight)
                     .background(
-                        Color(0xFF000000),
-                        RoundedCornerShape(8.dp)
+                        CardReadingColors.TerminalBackground,
+                        RoundedCornerShape(CardReadingRadius.Large)
                     )
-                    .padding(12.dp)
+                    .padding(CardReadingSpacing.Medium)
             ) {
                 if (viewModel.apduLog.isEmpty()) {
                     Column(
@@ -560,7 +538,7 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                     ) {
                         Text(
                             ">>> Waiting for card communication...",
-                            color = Color(0xFF00FF41),
+                            color = CardReadingColors.SuccessGreen,
                             style = MaterialTheme.typography.bodySmall.copy(
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                             )
@@ -569,7 +547,7 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small / 2),
                         reverseLayout = false // Show chronological order (PPSE → AID → GPO → Records)
                     ) {
                         items(viewModel.apduLog.takeLast(20)) { apduEntry ->
@@ -592,7 +570,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
         Row(verticalAlignment = Alignment.Top) {
             Text(
                 "TX>",
-                color = Color(0xFF00FF41),
+                color = CardReadingColors.SuccessGreen,
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
@@ -602,7 +580,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     apduEntry.command,
-                    color = Color(0xFF00FF41),
+                    color = CardReadingColors.SuccessGreen,
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                         fontSize = 11.sp
@@ -616,7 +594,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
                 )
                 Text(
                     enhancedDesc,
-                    color = Color(0xFF888888),
+                    color = CardReadingColors.TextSecondary,
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontSize = 10.sp
                     )
@@ -628,7 +606,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
         Row(verticalAlignment = Alignment.Top) {
             Text(
                 "RX<",
-                color = Color(0xFF2196F3),
+                color = CardReadingColors.InfoBlue,
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
@@ -637,7 +615,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
             )
             Column(modifier = Modifier.weight(1f)) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small / 2),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -645,7 +623,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
                             "${apduEntry.response.take(40)}..." 
                         else 
                             apduEntry.response,
-                        color = Color(0xFF2196F3),
+                        color = CardReadingColors.InfoBlue,
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                             fontSize = 11.sp
@@ -656,7 +634,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
                     val (swColor, swDesc) = decodeStatusWord(apduEntry.statusWord)
                     Surface(
                         color = swColor.copy(alpha = 0.2f),
-                        shape = RoundedCornerShape(4.dp)
+                        shape = RoundedCornerShape(CardReadingRadius.Small)
                     ) {
                         Text(
                             apduEntry.statusWord,
@@ -671,18 +649,18 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
                     }
                 }
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(CardReadingSpacing.Small)
                 ) {
                     Text(
                         decodeStatusWord(apduEntry.statusWord).second,
-                        color = Color(0xFF666666),
+                        color = CardReadingColors.TextTertiary,
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontSize = 9.sp
                         )
                     )
                     Text(
                         "⏱ ${apduEntry.executionTimeMs}ms",
-                        color = Color(0xFF666666),
+                        color = CardReadingColors.TextTertiary,
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontSize = 9.sp
                         )
@@ -702,7 +680,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
                         parsedTags.take(3).forEach { (tag, desc) ->
                             Text(
                                 "  ├─ $tag: $desc",
-                                color = Color(0xFFFFB74D),
+                                color = CardReadingColors.WarningOrange,
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                                     fontSize = 9.sp
@@ -712,7 +690,7 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
                         if (parsedTags.size > 3) {
                             Text(
                                 "  └─ +${parsedTags.size - 3} more tags",
-                                color = Color(0xFF666666),
+                                color = CardReadingColors.TextTertiary,
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontSize = 9.sp
                                 )
@@ -732,39 +710,39 @@ private fun ApduLogItemParsed(apduEntry: com.nfsp00f33r.app.data.ApduLogEntry) {
  */
 private fun decodeStatusWord(sw: String): Pair<Color, String> {
     return when (sw.uppercase()) {
-        "9000" -> Pair(Color(0xFF4CAF50), "Success")
-        "6100" -> Pair(Color(0xFF2196F3), "More data available")
-        "6283" -> Pair(Color(0xFFFF9800), "File invalidated")
-        "6284" -> Pair(Color(0xFFFF9800), "Selected file in termination state")
-        "6300" -> Pair(Color(0xFFFF9800), "Authentication failed")
-        "6400" -> Pair(Color(0xFFF44336), "State memory unchanged")
-        "6581" -> Pair(Color(0xFFF44336), "Memory failure")
-        "6700" -> Pair(Color(0xFFF44336), "Wrong length")
-        "6800" -> Pair(Color(0xFFF44336), "Functions not supported")
-        "6900" -> Pair(Color(0xFFF44336), "Command not allowed")
-        "6982" -> Pair(Color(0xFFF44336), "Security status not satisfied")
-        "6983" -> Pair(Color(0xFFF44336), "Authentication method blocked")
-        "6985" -> Pair(Color(0xFFF44336), "No current EF selected")
-        "6986" -> Pair(Color(0xFFF44336), "No PIN defined")
-        "6A80" -> Pair(Color(0xFFF44336), "Incorrect parameters")
-        "6A81" -> Pair(Color(0xFFF44336), "Function not supported")
-        "6A82" -> Pair(Color(0xFFF44336), "File not found")
-        "6A83" -> Pair(Color(0xFFF44336), "Record not found")
-        "6A84" -> Pair(Color(0xFFF44336), "Not enough memory")
-        "6A86" -> Pair(Color(0xFFF44336), "Incorrect P1/P2")
-        "6A88" -> Pair(Color(0xFFF44336), "Referenced data not found")
-        "6B00" -> Pair(Color(0xFFF44336), "Wrong parameters P1-P2")
-        "6C00" -> Pair(Color(0xFFF44336), "Wrong length Le")
-        "6D00" -> Pair(Color(0xFFF44336), "Instruction not supported")
-        "6E00" -> Pair(Color(0xFFF44336), "Class not supported")
-        "6F00" -> Pair(Color(0xFFF44336), "Unknown error")
+        "9000" -> Pair(CardReadingColors.BrightGreen, "Success")
+        "6100" -> Pair(CardReadingColors.InfoBlue, "More data available")
+        "6283" -> Pair(CardReadingColors.Orange, "File invalidated")
+        "6284" -> Pair(CardReadingColors.Orange, "Selected file in termination state")
+        "6300" -> Pair(CardReadingColors.Orange, "Authentication failed")
+        "6400" -> Pair(CardReadingColors.DangerRed, "State memory unchanged")
+        "6581" -> Pair(CardReadingColors.DangerRed, "Memory failure")
+        "6700" -> Pair(CardReadingColors.DangerRed, "Wrong length")
+        "6800" -> Pair(CardReadingColors.DangerRed, "Functions not supported")
+        "6900" -> Pair(CardReadingColors.DangerRed, "Command not allowed")
+        "6982" -> Pair(CardReadingColors.DangerRed, "Security status not satisfied")
+        "6983" -> Pair(CardReadingColors.DangerRed, "Authentication method blocked")
+        "6985" -> Pair(CardReadingColors.DangerRed, "No current EF selected")
+        "6986" -> Pair(CardReadingColors.DangerRed, "No PIN defined")
+        "6A80" -> Pair(CardReadingColors.DangerRed, "Incorrect parameters")
+        "6A81" -> Pair(CardReadingColors.DangerRed, "Function not supported")
+        "6A82" -> Pair(CardReadingColors.DangerRed, "File not found")
+        "6A83" -> Pair(CardReadingColors.DangerRed, "Record not found")
+        "6A84" -> Pair(CardReadingColors.DangerRed, "Not enough memory")
+        "6A86" -> Pair(CardReadingColors.DangerRed, "Incorrect P1/P2")
+        "6A88" -> Pair(CardReadingColors.DangerRed, "Referenced data not found")
+        "6B00" -> Pair(CardReadingColors.DangerRed, "Wrong parameters P1-P2")
+        "6C00" -> Pair(CardReadingColors.DangerRed, "Wrong length Le")
+        "6D00" -> Pair(CardReadingColors.DangerRed, "Instruction not supported")
+        "6E00" -> Pair(CardReadingColors.DangerRed, "Class not supported")
+        "6F00" -> Pair(CardReadingColors.DangerRed, "Unknown error")
         else -> {
             if (sw.startsWith("61")) {
-                Pair(Color(0xFF2196F3), "${sw.substring(2).toIntOrNull(16) ?: 0} bytes available")
+                Pair(CardReadingColors.InfoBlue, "${sw.substring(2).toIntOrNull(16) ?: 0} bytes available")
             } else if (sw.startsWith("6C")) {
-                Pair(Color(0xFFFF9800), "Wrong length, correct: ${sw.substring(2)}")
+                Pair(CardReadingColors.Orange, "Wrong length, correct: ${sw.substring(2)}")
             } else {
-                Pair(Color(0xFF888888), "Unknown status")
+                Pair(CardReadingColors.TextSecondary, "Unknown status")
             }
         }
     }
@@ -803,10 +781,10 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
         colors = CardDefaults.cardColors(
             containerColor = Color(0xFF1A1A1A)
         ),
-        shape = RoundedCornerShape(8.dp)
+        shape = RoundedCornerShape(CardReadingRadius.Large)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(CardReadingSpacing.Large)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -817,14 +795,14 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                     text = "EMV DATA EXTRACTED",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF00FF00)
+                        color = CardReadingColors.SuccessGreen
                     )
                 )
                 
                 Text(
                     text = "${viewModel.parsedEmvFields.size} fields",
                     style = MaterialTheme.typography.bodySmall.copy(
-                        color = Color(0xFF666666)
+                        color = CardReadingColors.TextTertiary
                     )
                 )
             }
@@ -834,7 +812,7 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
             // Display parsed EMV fields in a grid-like layout
             LazyColumn(
                 modifier = Modifier.heightIn(max = 300.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Tiny)
             ) {
                 // Group fields by category for better organization
                 val cardData = viewModel.parsedEmvFields.filter { (key, _) -> 
@@ -852,7 +830,7 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                         Text(
                             text = "CARD DATA",
                             style = MaterialTheme.typography.labelMedium.copy(
-                                color = Color(0xFF00FFFF),
+                                color = CardReadingColors.Cyan,
                                 fontWeight = FontWeight.Bold
                             ),
                             modifier = Modifier.padding(vertical = 4.dp)
@@ -868,7 +846,7 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                         Text(
                             text = "APPLICATION DATA",
                             style = MaterialTheme.typography.labelMedium.copy(
-                                color = Color(0xFF00FFFF),
+                                color = CardReadingColors.Cyan,
                                 fontWeight = FontWeight.Bold
                             ),
                             modifier = Modifier.padding(vertical = 4.dp)
@@ -884,7 +862,7 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                         Text(
                             text = "CRYPTOGRAPHIC DATA",
                             style = MaterialTheme.typography.labelMedium.copy(
-                                color = Color(0xFF00FFFF),
+                                color = CardReadingColors.Cyan,
                                 fontWeight = FontWeight.Bold
                             ),
                             modifier = Modifier.padding(vertical = 4.dp)
@@ -931,7 +909,7 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                         Text(
                             text = "OTHER EMV FIELDS",
                             style = MaterialTheme.typography.labelMedium.copy(
-                                color = Color(0xFF00FFFF),
+                                color = CardReadingColors.Cyan,
                                 fontWeight = FontWeight.Bold
                             ),
                             modifier = Modifier.padding(vertical = 4.dp)
@@ -971,7 +949,7 @@ private fun EmvFieldRow(key: String, value: String) {
         Text(
             text = displayKey,
             style = MaterialTheme.typography.bodySmall.copy(
-                color = Color(0xFF888888),
+                color = CardReadingColors.TextSecondary,
                 fontWeight = FontWeight.Medium
             ),
             modifier = Modifier.weight(1.5f)
@@ -980,7 +958,7 @@ private fun EmvFieldRow(key: String, value: String) {
         Text(
             text = value,
             style = MaterialTheme.typography.bodySmall.copy(
-                color = Color(0xFF00FF00),
+                color = CardReadingColors.SuccessGreen,
                 fontWeight = FontWeight.Bold
             ),
             modifier = Modifier.weight(2f),
