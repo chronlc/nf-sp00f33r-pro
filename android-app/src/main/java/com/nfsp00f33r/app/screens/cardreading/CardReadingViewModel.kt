@@ -38,8 +38,21 @@ import com.nfsp00f33r.app.cardreading.EmvTagDictionary
  * - Live APDU logging with real-time updates
  * - Hardware reader management and selection
  * - All card data now persists with AES-256-GCM encryption
+ * 
+ * PHASE 1: Multi-AID Processing - Extracts and analyzes ALL AIDs from PPSE
  */
 class CardReadingViewModel(private val context: Context) : ViewModel() {
+    
+    /**
+     * Data class for AID (Application Identifier) entries from PPSE response
+     * Used to process ALL AIDs on card, not just first one
+     * ChAP-inspired multi-AID analysis for security research
+     */
+    data class AidEntry(
+        val aid: String,           // AID hex string (tag 4F)
+        val label: String,         // Application Label (tag 50) or "Unknown"
+        val priority: Int          // Application Priority (tag 87) or 0
+    )
     
     // Hardware and reader management - Phase 2B Day 1: Migrated to PN532DeviceModule
     private val pn532Module by lazy {
@@ -327,15 +340,18 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     }
                     Timber.w("PPSE selection failed with SW=$realStatusWord (tried both 2PAY and 1PAY), switching strategy")
                 } else {
-                    // Parse PPSE response for real AIDs
-                    val realAids = extractAidsFromPpseResponse(ppseHex)
-                    if (realAids.isNotEmpty()) {
+                    // Parse PPSE response for ALL AIDs (PHASE 1: Multi-AID analysis)
+                    val realAidEntries = extractAllAidsFromPse(ppseHex)
+                    if (realAidEntries.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
-                            statusMessage = "PPSE Success ($ppseMode) - Found ${realAids.size} AID(s)"
+                            statusMessage = "PPSE Success ($ppseMode) - Found ${realAidEntries.size} AID(s)"
                         }
-                        Timber.i("PPSE ($ppseMode) returned ${realAids.size} real AIDs: ${realAids.joinToString(", ")}")
+                        Timber.i("PPSE ($ppseMode) returned ${realAidEntries.size} real AIDs:")
+                        realAidEntries.forEachIndexed { idx, entry ->
+                            Timber.i("  #${idx + 1}: ${entry.aid} (${entry.label}, priority ${entry.priority})")
+                        }
                         // Store real AIDs for use in AID selection phase
-                        extractedAids = realAids
+                        extractedAidEntries = realAidEntries
                     }
                 }
             } else {
@@ -1066,27 +1082,66 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
-     * Extract AIDs from PPSE response - LIVE ANALYSIS
+     * Extract ALL AIDs from PPSE response with label and priority - MULTI-AID ANALYSIS
+     * ChAP-inspired: Process ALL AIDs to find weak secondary applications
+     * PHASE 1 ENHANCEMENT
      */
-    private fun extractAidsFromPpseResponse(hexResponse: String): List<String> {
-        val aids = mutableListOf<String>()
+    private fun extractAllAidsFromPpse(hexResponse: String): List<AidEntry> {
+        val aids = mutableListOf<AidEntry>()
         try {
-            // Look for Directory Entry (61) containing AID (4F)
+            // Look for Directory Entry (61) containing AID (4F), Label (50), Priority (87)
             val directoryRegex = "61([0-9A-F]{2})([0-9A-F]+)".toRegex()
             directoryRegex.findAll(hexResponse).forEach { match ->
                 val directoryData = match.groupValues[2]
+                
+                // Extract AID (tag 4F)
                 val aidRegex = "4F([0-9A-F]{2})([0-9A-F]+)".toRegex()
                 val aidMatch = aidRegex.find(directoryData)
-                if (aidMatch != null) {
+                val aid = if (aidMatch != null) {
                     val length = aidMatch.groupValues[1].toInt(16) * 2
-                    val aid = aidMatch.groupValues[2].take(length)
-                    if (aid.isNotEmpty()) aids.add(aid)
+                    aidMatch.groupValues[2].take(length)
+                } else ""
+                
+                if (aid.isNotEmpty()) {
+                    // Extract Application Label (tag 50)
+                    val labelRegex = "50([0-9A-F]{2})([0-9A-F]+)".toRegex()
+                    val labelMatch = labelRegex.find(directoryData)
+                    val label = if (labelMatch != null) {
+                        val length = labelMatch.groupValues[1].toInt(16) * 2
+                        val labelHex = labelMatch.groupValues[2].take(length)
+                        // Convert hex to ASCII
+                        labelHex.chunked(2).map { 
+                            val charCode = it.toInt(16)
+                            if (charCode in 32..126) charCode.toChar() else '.'
+                        }.joinToString("")
+                    } else "Unknown App"
+                    
+                    // Extract Application Priority (tag 87)
+                    val priorityRegex = "87([0-9A-F]{2})([0-9A-F]+)".toRegex()
+                    val priorityMatch = priorityRegex.find(directoryData)
+                    val priority = if (priorityMatch != null) {
+                        val length = priorityMatch.groupValues[1].toInt(16) * 2
+                        priorityMatch.groupValues[2].take(length).toIntOrNull(16) ?: 0
+                    } else 0
+                    
+                    aids.add(AidEntry(aid, label.trim(), priority))
+                    Timber.i("Found AID: $aid, Label: ${label.trim()}, Priority: $priority")
                 }
             }
         } catch (e: Exception) {
             Timber.e(e, "Error extracting AIDs from PPSE")
         }
-        return aids
+        
+        // Sort by priority (lower number = higher priority)
+        return aids.sortedBy { it.priority }
+    }
+    
+    /**
+     * Legacy function for backward compatibility - delegates to extractAllAidsFromPpse
+     */
+    @Deprecated("Use extractAllAidsFromPse() for multi-AID support", ReplaceWith("extractAllAidsFromPse(hexResponse).map { it.aid }"))
+    private fun extractAidsFromPpseResponse(hexResponse: String): List<String> {
+        return extractAllAidsFromPse(hexResponse).map { it.aid }
     }
     
     /**
