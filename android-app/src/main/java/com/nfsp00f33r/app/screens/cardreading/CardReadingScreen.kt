@@ -537,37 +537,7 @@ private fun ApduTerminalSection(viewModel: CardReadingViewModel) {
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF666666)
                     )
-                    
-                    if (viewModel.apduLog.isNotEmpty()) {
-                        androidx.compose.material3.Button(
-                            onClick = {
-                                // Print full APDU log to Timber
-                                timber.log.Timber.i("=".repeat(80))
-                                timber.log.Timber.i("FULL APDU LOG - ${viewModel.apduLog.size} commands")
-                                timber.log.Timber.i("=".repeat(80))
-                                viewModel.apduLog.forEachIndexed { index, entry ->
-                                    timber.log.Timber.i("")
-                                    timber.log.Timber.i("[$index] ${entry.description}")
-                                    timber.log.Timber.i("  TX: ${entry.command}")
-                                    timber.log.Timber.i("  RX: ${entry.response}")
-                                    timber.log.Timber.i("  SW: ${entry.statusWord}")
-                                }
-                                timber.log.Timber.i("=".repeat(80))
-                            },
-                            modifier = Modifier.height(24.dp),
-                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF1A1A1A)
-                            ),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) {
-                            Text(
-                                "DUMP",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF00FF41),
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
+
                 }
             }
             
@@ -851,51 +821,12 @@ private fun EmvDataDisplaySection(viewModel: CardReadingViewModel) {
                     )
                 )
                 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "${viewModel.parsedEmvFields.size} fields",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            color = Color(0xFF666666)
-                        )
+                Text(
+                    text = "${viewModel.parsedEmvFields.size} fields",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = Color(0xFF666666)
                     )
-                    
-                    // DUMP button to output all EMV data to Timber logs
-                    Button(
-                        onClick = {
-                            // Dump all EMV data to Timber for AI analysis
-                            timber.log.Timber.i("=".repeat(80))
-                            timber.log.Timber.i("FULL EMV DATA - ${viewModel.parsedEmvFields.size} fields")
-                            timber.log.Timber.i("=".repeat(80))
-                            viewModel.parsedEmvFields.forEach { (key, value) ->
-                                // Get tag description for hex tags
-                                val displayKey = if (key.matches(Regex("^[0-9A-F]+$"))) {
-                                    val tagName = EmvTagDictionary.getTagDescription(key)
-                                    "$key - $tagName"
-                                } else {
-                                    key.uppercase().replace("_", " ")
-                                }
-                                timber.log.Timber.i("$displayKey: $value")
-                            }
-                            timber.log.Timber.i("=".repeat(80))
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF2A2A2A)
-                        ),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        modifier = Modifier.height(28.dp)
-                    ) {
-                        Text(
-                            "DUMP",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = Color(0xFF00FF00),
-                                fontWeight = FontWeight.Bold
-                            )
-                        )
-                    }
-                }
+                )
             }
             
             Spacer(modifier = Modifier.height(12.dp))

@@ -951,6 +951,38 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             parsedEmvFields = extractedData.emvTags
             statusMessage = "Card saved to database - Ready for next scan"
             scanState = ScanState.IDLE
+            
+            // Auto-dump EMV data to Timber for debugging
+            if (parsedEmvFields.isNotEmpty()) {
+                Timber.i("=".repeat(80))
+                Timber.i("FULL EMV DATA - ${parsedEmvFields.size} fields")
+                Timber.i("=".repeat(80))
+                parsedEmvFields.forEach { (key, fieldValue) ->
+                    val displayKey = if (key.matches(Regex("^[0-9A-F]+$"))) {
+                        val tagName = com.nfsp00f33r.app.cardreading.EmvTagDictionary.getTagDescription(key)
+                        "$key - $tagName"
+                    } else {
+                        key.uppercase().replace("_", " ")
+                    }
+                    Timber.i("$displayKey: $fieldValue")
+                }
+                Timber.i("=".repeat(80))
+            }
+            
+            // Auto-dump APDU log to Timber for debugging
+            if (apduLog.isNotEmpty()) {
+                Timber.i("=".repeat(80))
+                Timber.i("FULL APDU LOG - ${apduLog.size} commands")
+                Timber.i("=".repeat(80))
+                apduLog.forEachIndexed { index, entry ->
+                    Timber.i("")
+                    Timber.i("[$index] ${entry.description}")
+                    Timber.i("  TX: ${entry.command}")
+                    Timber.i("  RX: ${entry.response}")
+                    Timber.i("  SW: ${entry.statusWord}")
+                }
+                Timber.i("=".repeat(80))
+            }
         }
     }
     
