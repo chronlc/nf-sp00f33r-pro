@@ -512,17 +512,20 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     when (realStatusWord) {
                         "9000" -> {
                             successfulAids++
+                            
+                            // PHASE 3C: Parse AID response with unified parser
+                            val aidBytes = aidHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val aidParseResult = EmvTlvParser.parseResponse(aidBytes, "SELECT_AID", aidLabel)
+                            
+                            // Store parsed AID data in session
+                            currentSessionData?.aidResponses?.add(aidParseResult.tags)
+                            currentSessionData?.allTags?.putAll(aidParseResult.tags)
+                            
                             displayParsedData("AID_${aidIndex + 1}_$aidLabel", aidHex)
                             withContext(Dispatchers.Main) {
                                 statusMessage = "✓ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Priority $aidPriority)"
                             }
-                            Timber.i("✓ AID #${aidIndex + 1} selected: $aidLabel ($aidHexString)")
-                            
-                            // Parse FCI template from successful AID selection
-                            val fciData = extractFciFromAidResponse(aidHex)
-                            if (fciData.isNotEmpty()) {
-                                Timber.d("  FCI: ${fciData.take(32)}...")
-                            }
+                            Timber.i("PHASE 3C: AID #${aidIndex + 1} selected: $aidLabel ($aidHexString), ${aidParseResult.tags.size} tags parsed")
                             
                             // Store first successful AID for GPO
                             if (selectedAidHex.isEmpty()) {
@@ -633,14 +636,24 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 )
                 displayParsedData("GPO", gpoHex)
                 
-                // LIVE ANALYSIS: Check GPO response and extract real data
+                // PHASE 3C: Parse GPO response with unified parser
                 when (realStatusWord) {
                     "9000" -> {
-                        val extractedPan = extractPanFromResponse(gpoHex)
-                        val aip = extractAipFromResponse(gpoHex)
-                        val afl = extractAflFromResponse(gpoHex)
+                        val gpoBytes = gpoHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        val gpoParseResult = EmvTlvParser.parseResponse(gpoBytes, "GPO")
                         
-                        // PHASE 3: Parse AIP for security analysis
+                        // Store parsed GPO data in session
+                        currentSessionData?.gpoResponse = gpoParseResult.tags
+                        currentSessionData?.allTags?.putAll(gpoParseResult.tags)
+                        
+                        // Extract key fields from parsed tags
+                        val extractedPan = gpoParseResult.tags["5A"]?.value ?: ""
+                        val aip = gpoParseResult.tags["82"]?.value ?: ""
+                        val afl = gpoParseResult.tags["94"]?.value ?: ""
+                        
+                        Timber.i("PHASE 3C: GPO parsed ${gpoParseResult.tags.size} tags, PAN=${if (extractedPan.isNotEmpty()) "present" else "none"}, AIP=${aip}, AFL=${if (afl.isNotEmpty()) "${afl.length/2} bytes" else "none"}")
+                        
+                        // Parse AIP for security analysis
                         if (aip.isNotEmpty()) {
                             val aipCapabilities = EmvTlvParser.parseAip(aip)
                             aipCapabilities?.let { cap ->
@@ -656,15 +669,15 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                                 }
                             }
                             
-                            // PHASE 3: Enhanced security analysis using analyzeAip
+                            // Enhanced security analysis
                             val securityInfo = analyzeAip(aip)
                             if (securityInfo.isWeak) {
-                                Timber.w("PHASE 3 SECURITY ALERT: ${securityInfo.summary}")
+                                Timber.w("SECURITY ALERT: ${securityInfo.summary}")
                                 withContext(Dispatchers.Main) {
                                     statusMessage += " [${securityInfo.summary}]"
                                 }
                             } else {
-                                Timber.i("PHASE 3: ${securityInfo.summary}")
+                                Timber.i("${securityInfo.summary}")
                             }
                         }
                         
@@ -690,10 +703,10 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                             }
                         }
                         
-                        // Check for cryptogram in GPO response (Visa Quick VSDC cards return cryptogram in GPO)
-                        val cryptogram = extractCryptogramFromAllResponses(apduLog)
-                        val cid = extractCidFromAllResponses(apduLog)
-                        val atc = extractAtcFromAllResponses(apduLog)
+                        // Check for cryptogram in GPO response (Visa Quick VSDC)
+                        val cryptogram = gpoParseResult.tags["9F26"]?.value ?: ""
+                        val cid = gpoParseResult.tags["9F27"]?.value ?: ""
+                        val atc = gpoParseResult.tags["9F36"]?.value ?: ""
                         
                         if (cryptogram.isNotEmpty()) {
                             withContext(Dispatchers.Main) {
@@ -702,7 +715,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                             Timber.i("GPO returned cryptogram directly (Visa Quick VSDC): AC=$cryptogram, CID=$cid, ATC=$atc")
                         }
                         
-                        // Parse AFL using EmvTlvParser for dynamic record reading
+                        // Parse AFL for dynamic record reading
                         if (afl.isNotEmpty()) {
                             val aflEntries = EmvTlvParser.parseAfl(afl)
                             if (aflEntries.isNotEmpty()) {
@@ -791,54 +804,57 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                         0L
                     )
                     
-                    // LIVE ANALYSIS: Check what we actually got
+                    // PHASE 3C: Parse record response with unified parser
                     when (realStatusWord) {
                         "9000" -> {
                             recordsRead++
+                            
+                            val readBytes = readHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val recordParseResult = EmvTlvParser.parseResponse(readBytes, "READ_RECORD", "SFI$sfi-REC$record")
+                            
+                            // Store parsed record data in session
+                            currentSessionData?.recordResponses?.add(recordParseResult.tags)
+                            currentSessionData?.allTags?.putAll(recordParseResult.tags)
+                            
                             displayParsedData("SFI${sfi}_REC$record", readHex)
                             
-                            val recordPan = extractPanFromResponse(readHex)
-                            val track2 = extractTrack2FromAllResponses(listOf(com.nfsp00f33r.app.data.ApduLogEntry("", "", readHex, "", "", 0)))
+                            // Extract key fields from parsed tags
+                            val recordPan = recordParseResult.tags["5A"]?.value ?: ""
+                            val track2 = recordParseResult.tags["57"]?.value ?: ""
+                            val expiry = recordParseResult.tags["5F24"]?.valueDecoded ?: "N/A"
+                            val cardholderName = recordParseResult.tags["5F20"]?.valueDecoded ?: "N/A"
                             
-                            // DETAILED PARSING: Extract and display all EMV data found
-                            val detailedData = extractDetailedEmvData(readHex)
+                            // Build detailed data map for UI
+                            val detailedData = recordParseResult.tags.mapNotNull { (tag, enriched) ->
+                                enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                            }.toMap()
                             
                             // UPDATE UI STATE: Merge new data with existing parsed fields
                             parsedEmvFields = parsedEmvFields + detailedData
                             
+                            Timber.i("PHASE 3C: SFI $sfi Record $record parsed ${recordParseResult.tags.size} tags")
+                            
                             when {
                                 recordPan.isNotEmpty() -> {
-                                    val expiry = detailedData["expiry_date"] ?: "N/A"
-                                    val cardholderName = detailedData["cardholder_name"] ?: "N/A"
                                     statusMessage = "SFI $sfi Rec $record: PAN=${recordPan} EXP=$expiry NAME=$cardholderName"
                                     panFound = true
-                                    Timber.i("Found PAN in SFI $sfi Record $record: Full Data = $detailedData")
+                                    Timber.i("Found PAN in SFI $sfi Record $record")
                                 }
                                 track2.isNotEmpty() -> {
-                                    val track2Pan = extractPanFromTrack2(track2)
-                                    val track2Expiry = extractExpiryFromTrack2(track2)
+                                    val track2Pan = track2.substringBefore("D")
+                                    val track2Expiry = track2.substringAfter("D").take(4)
                                     statusMessage = "SFI $sfi Rec $record: Track2 PAN=${track2Pan} EXP=$track2Expiry"
-                                    Timber.i("Found Track2 in SFI $sfi Record $record: $detailedData")
+                                    Timber.i("Found Track2 in SFI $sfi Record $record")
                                 }
                                 else -> {
-                                    val tags = extractAllTagsFromResponse(readHex)
-                                    val importantTags = tags.filter { (tag, _) -> 
+                                    val importantTags = recordParseResult.tags.filter { (tag, _) -> 
                                         tag in listOf("5A", "57", "5F20", "5F24", "5F25", "5F28", "5F2A", "82", "84", "87", "94", "9F07", "9F08", "9F0D", "9F0E", "9F0F")
                                     }
-                                    statusMessage = "SFI $sfi Rec $record: ${tags.size} tags (${importantTags.size} important)"
+                                    statusMessage = "SFI $sfi Rec $record: ${recordParseResult.tags.size} tags (${importantTags.size} important)"
                                     if (importantTags.isNotEmpty()) {
-                                        Timber.i("SFI $sfi Record $record important tags: $importantTags")
+                                        Timber.i("SFI $sfi Record $record important tags: ${importantTags.keys.joinToString(",")}")
                                     }
                                 }
-                            }
-                            
-                            // Log all extracted data for debugging
-                            if (detailedData.isNotEmpty()) {
-                                Timber.i("=== DETAILED EMV DATA SFI $sfi REC $record ===")
-                                detailedData.forEach { (key, value) ->
-                                    Timber.i("$key: $value")
-                                }
-                                Timber.i("=== END DETAILED DATA ===")
                             }
                         }
                         "6A83" -> {
