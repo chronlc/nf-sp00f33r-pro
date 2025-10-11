@@ -41,6 +41,57 @@ viewModelScope.launch(Dispatchers.IO) {
 
 ---
 
+## 🎯 CRITICAL DESIGN PRINCIPLE: SINGLE-PASS DATA PROCESSING
+
+### Current Problem: Data Processed TWICE
+```kotlin
+// Pass 1: Add to APDU log
+apduLog = apduLog + ApduLogEntry(command, response, statusWord, description, execTime)
+
+// Pass 2: Manual parsing (separate function call)
+val aids = extractAllAidsFromPpse(response)  // Parses same response AGAIN
+```
+
+### Solution: parseResponse() Does EVERYTHING Once
+```kotlin
+// Single call - data flows through system ONCE
+emvCollector.parseResponse(
+    phase = "PPSE",
+    command = command,
+    response = response,  // ← Data passed ONCE
+    statusWord = statusWord,
+    description = description,
+    executionTime = execTime
+)
+
+// Inside parseResponse():
+// 1. Add to APDU log          ← Done
+// 2. Parse ALL TLV tags        ← Done (via EmvTlvParser)
+// 3. Store in allTags          ← Done
+// 4. Categorize by phase       ← Done
+// 5. Extract common fields     ← Done
+```
+
+### Benefits
+✅ **Zero Duplication** - Response data parsed once  
+✅ **Zero Manual Extraction** - All automatic via EmvTlvParser  
+✅ **Complete Capture** - 200+ tags vs current ~30-40  
+✅ **Structured Storage** - Phase-categorized data structures  
+✅ **Performance** - Single pass = faster  
+
+### Implementation Rule
+**Every APDU response goes through parseResponse() EXACTLY ONCE**
+- PPSE response → parseResponse(phase="PPSE", ...)
+- AID selection → parseResponse(phase="SELECT_AID", ...)
+- GPO response → parseResponse(phase="GPO", ...)
+- Record → parseResponse(phase="READ_RECORD", ...)
+- GENERATE AC → parseResponse(phase="GENERATE_AC", ...)
+- GET DATA → parseResponse(phase="GET_DATA", ...)
+
+**No exceptions. No manual parsing. One pass per response.**
+
+---
+
 ## 📊 CURRENT STATE ANALYSIS
 
 ### CardReadingViewModel.kt (3855 lines)
@@ -250,7 +301,7 @@ From previous research of rfidresearchgroup/proxmark3:
 
 ### New Components to Create
 
-#### 1. EmvDataCollector.kt
+#### 1. EmvDataCollector.kt - **THE SINGLE-PASS UNIFIED PARSER**
 **Location:** `/android-app/src/main/kotlin/com/nfsp00f33r/app/cardreading/EmvDataCollector.kt`
 
 ```kotlin
@@ -259,31 +310,61 @@ class EmvDataCollector(private val context: Context) {
     private val parser = EmvTlvParser
     private val tagDictionary = EmvTagDictionary
     
-    // SINGLE ENTRY POINT - Called at each workflow phase
+    /**
+     * SINGLE ENTRY POINT - Called once per APDU response
+     * 
+     * This is the ONLY parsing function needed. It does EVERYTHING:
+     * - Adds APDU to log
+     * - Extracts ALL TLV tags (via EmvTlvParser)
+     * - Categorizes by phase (PPSE/AID/GPO/RECORD/AC/etc.)
+     * - Stores in structured sessionData
+     * 
+     * DATA FLOWS THROUGH ONCE - No duplicate processing
+     */
     fun parseResponse(
-        command: ByteArray,
-        response: ByteArray,
-        statusWord: String,
-        phase: EmvPhase
+        phase: String,              // "PPSE", "SELECT_AID", "GPO", etc.
+        command: ByteArray,         // APDU command
+        response: ByteArray,        // APDU response ← PARSED ONCE
+        statusWord: String,         // Status word
+        description: String,        // Human-readable
+        executionTime: Long         // Milliseconds
     ) {
-        // 1. Add to APDU log (memory)
-        // 2. Auto-extract ALL EMV tags via EmvTlvParser
+        // 1. Add to APDU log (memory-only, instant)
+        sessionData.apduLog.add(ApduLogEntry(...))
+        
+        // 2. Extract ALL TLV tags in ONE PASS (via EmvTlvParser)
+        val allTags = parser.parseAllTags(response)
+        sessionData.allTags.putAll(allTags)  // Master map: 200+ tags
+        
         // 3. Smart categorization by phase
-        // 4. Store in sessionData (structured)
-        // NO DATABASE HIT - just memory!
+        when (phase) {
+            "PPSE" -> sessionData.ppse = PpseData.fromTags(allTags)
+            "SELECT_AID" -> sessionData.aids.add(AidData.fromTags(allTags))
+            "GPO" -> sessionData.gpo = GpoData.fromTags(allTags)
+            "READ_RECORD" -> sessionData.records.add(RecordData.fromTags(allTags))
+            "GENERATE_AC" -> sessionData.cryptogram = CryptogramData.fromTags(allTags)
+            // ... etc
+        }
+        
+        // 4. Extract common fields (PAN/expiry/name) wherever they appear
+        allTags["5A"]?.let { sessionData.pan = it }
+        allTags["5F24"]?.let { sessionData.expiryDate = it }
+        allTags["5F20"]?.let { sessionData.cardholderName = it }
+        
+        // NO DATABASE WRITE - Pure memory operation (microseconds)
     }
     
     // Async DB write AFTER scan complete
-    suspend fun saveToDatabase() {
-        withContext(Dispatchers.IO) {
-            // Save to Room database
-            // Convert sessionData -> CardProfile
-            // Insert EmvSessionEntity, EmvTagEntity, EmvApduLogEntity
+    suspend fun saveToDatabase(): String {
+        return withContext(Dispatchers.IO) {
+            // Convert sessionData -> Room entities
+            // Insert into EmvSessionDatabase
+            // Return session ID
         }
     }
     
     fun getSessionData(): EmvSessionData = sessionData
-    fun reset() { /* Clear for next scan */ }
+    fun reset() { sessionData = EmvSessionData() }
 }
 
 enum class EmvPhase {
@@ -600,12 +681,63 @@ abstract class EmvSessionDatabase : RoomDatabase() {
 #### Step 2.2: Create EmvDataCollector.kt
 **Location:** `/android-app/src/main/kotlin/com/nfsp00f33r/app/cardreading/EmvDataCollector.kt`
 
-- `parseResponse()` function - Called at each EMV phase
-- Integrate with EmvTlvParser for automatic tag extraction
-- Smart categorization logic by phase
-- In-memory sessionData buffer
-- `saveToDatabase()` function - Async DB write after scan
-- Links to EmvSessionDatabase (created in Phase 1)
+**🔑 KEY DESIGN: SINGLE-PASS UNIFIED PARSER**
+
+**parseResponse()** - Called once per APDU response, does EVERYTHING:
+```kotlin
+fun parseResponse(
+    phase: String,              // "PPSE", "SELECT_AID", "GPO", "READ_RECORD", etc.
+    command: ByteArray,         // APDU command sent
+    response: ByteArray,        // APDU response received
+    statusWord: String,         // "9000", "6A82", etc.
+    description: String,        // Human-readable description
+    executionTime: Long         // Milliseconds
+) {
+    // 1. Add to APDU log (replaces addApduLogEntry)
+    sessionData.apduLog.add(ApduLogEntry(...))
+    
+    // 2. Parse ALL TLV tags in response (uses EmvTlvParser)
+    val tags = EmvTlvParser.parseAllTags(response)
+    sessionData.allTags.putAll(tags)  // Store in master map
+    
+    // 3. Categorize by phase (smart routing)
+    when (phase) {
+        "PPSE" -> {
+            sessionData.ppse = PpseData(
+                fciTemplate = tags["6F"],
+                dfName = tags["84"],
+                aids = EmvTlvParser.extractAids(tags),
+                // ... all PPSE-specific fields
+            )
+        }
+        "SELECT_AID" -> {
+            sessionData.aids.add(AidData(
+                aid = currentAid,
+                pdol = tags["9F38"],
+                aip = tags["82"],
+                afl = tags["94"],
+                // ... all AID-specific fields
+            ))
+        }
+        "GPO" -> { /* Parse GPO response */ }
+        "READ_RECORD" -> { /* Parse record */ }
+        "GENERATE_AC" -> { /* Parse ARQC/TC */ }
+        // ... etc
+    }
+    
+    // 4. Extract common fields (pan, expiry, cardholder name) wherever they appear
+    tags["5A"]?.let { sessionData.pan = it }
+    tags["5F24"]?.let { sessionData.expiryDate = it }
+    tags["5F20"]?.let { sessionData.cardholderName = it }
+}
+```
+
+**saveToDatabase()** - Called ONCE after complete scan:
+- Async write to EmvSessionDatabase (Room)
+- Converts sessionData → entities (EmvSessionEntity, EmvTagEntity, EmvApduLogEntity)
+- Returns session ID
+
+**Result:** Zero manual extraction, zero duplicate parsing, one pass per response
 
 **Build & Verify:** Ensure EmvDataCollector compiles with database references
 
@@ -620,12 +752,15 @@ private val emvCollector = EmvDataCollector(context)
 
 **BEFORE (Current - Lines 280-360):**
 ```kotlin
-// Phase 1: PPSE
+**BEFORE (Current - Manual Parsing - Lines 280-360):**
+```kotlin
+// Phase 1: PPSE - TWO SEPARATE OPERATIONS
 val ppse1PayCommand = byteArrayOf(...)
 val startTime = System.currentTimeMillis()
 ppseResponse = isoDep.transceive(ppse1PayCommand)
 val execTime = System.currentTimeMillis() - startTime
 
+// Operation 1: Add to APDU log manually
 withContext(Dispatchers.Main) {
     apduLog = apduLog + ApduLogEntry(
         command = bytesToHex(ppse1PayCommand),
@@ -636,8 +771,42 @@ withContext(Dispatchers.Main) {
     )
 }
 
-// Then manual parsing...
-val realAidEntries = extractAllAidsFromPpse(ppseHex)
+// Operation 2: Manual parsing (separate function call)
+val realAidEntries = extractAllAidsFromPpse(ppseHex)  // Line 1362
+
+// Problem: Data passed through system TWICE (once for log, once for parsing)
+```
+
+**AFTER (Single-Pass Unified Parser):**
+```kotlin
+// Phase 1: PPSE - ONE OPERATION, EVERYTHING AUTOMATIC
+val ppse1PayCommand = byteArrayOf(...)
+val startTime = System.currentTimeMillis()
+ppseResponse = isoDep.transceive(ppse1PayCommand)
+val execTime = System.currentTimeMillis() - startTime
+
+// Single function call - does EVERYTHING in one pass:
+emvCollector.parseResponse(
+    phase = "PPSE",
+    command = ppse1PayCommand,
+    response = ppseResponse,           // ← Data passed ONCE
+    statusWord = realStatusWord,
+    description = "SELECT PPSE 1PAY.SYS.DDF01",
+    executionTime = execTime
+)
+
+// ✅ AUTOMATIC RESULTS (single pass):
+// - APDU log entry created
+// - ALL TLV tags extracted (via EmvTlvParser)
+// - Tags stored in allTags map (200+)
+// - PPSE-specific data categorized (PPSEData structure)
+// - AIDs extracted and stored
+// - Common fields extracted (if present)
+// 
+// ✅ ZERO manual parsing
+// ✅ ZERO duplicate processing
+// ✅ ONE pass through response data
+```
 extractedAidEntries = realAidEntries
 ```
 
@@ -857,12 +1026,17 @@ Total: ~4100 lines across 6 well-organized files
 
 ### Phase 2: Create EmvDataCollector (In-Memory Buffer)
 - [ ] Create EmvSessionData.kt with all 10 data classes (PpseData, AidData, etc.)
-- [ ] Create EmvDataCollector.kt with parseResponse() method
-- [ ] Implement automatic tag extraction via EmvTlvParser integration
-- [ ] Implement smart categorization by phase (PPSE, AID, GPO, etc.)
+- [ ] Create EmvDataCollector.kt with **SINGLE-PASS parseResponse()** method
+- [ ] parseResponse() does EVERYTHING in one pass:
+  - [ ] Add APDU log entry (replaces addApduLogEntry)
+  - [ ] Extract ALL TLV tags via EmvTlvParser (replaces manual extraction)
+  - [ ] Store tags in allTags map (200+ tags)
+  - [ ] Categorize by phase (PPSE/AID/GPO/RECORD/AC/etc.)
+  - [ ] Extract common fields (PAN/expiry/name wherever found)
 - [ ] Implement saveToDatabase() method with EmvSessionDatabase integration
 - [ ] Add bytesToHex() helper method
 - [ ] Build and verify EmvDataCollector compiles with database references
+- [ ] **VERIFY:** Data flows through parseResponse() ONCE per APDU
 
 ### Phase 3: Integration into CardReadingViewModel
 - [ ] Add emvCollector instance to CardReadingViewModel
