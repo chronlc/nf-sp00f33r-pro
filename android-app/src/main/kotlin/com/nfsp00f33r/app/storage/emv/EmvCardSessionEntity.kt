@@ -9,6 +9,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
+import com.nfsp00f33r.app.cardreading.EnrichedTagData
 
 /**
  * Single comprehensive entity for complete EMV card session
@@ -74,14 +75,14 @@ data class EmvCardSessionEntity(
     val rocaKeyModulus: String?,
     val hasEncryptedData: Boolean,
     
-    // === COMPLETE DATA (JSON) ===
-    // This is where ALL 200+ tags live - just one JSON field!
-    val allEmvTags: Map<String, EmvTagData>,  // Key = tag (e.g., "5A"), Value = tag data
+    // === COMPLETE EMV DATA (JSON STORAGE) ===
+    // Everything stored - one simple map, one simple array
+    
+    // All 200+ EMV tags with enriched data (tag, name, value, decoded, phase, source, length)
+    val allEmvTags: Map<String, EnrichedTagData>,
     
     // Complete APDU log - just one JSON array!
-    val apduLog: List<ApduLogEntry>,
-    
-    // Phase-categorized data (for quick access without parsing allEmvTags)
+    val apduLog: List<ApduLogEntry>,    // Phase-categorized data (for quick access without parsing allEmvTags)
     val ppseData: PpseData?,
     val aidsData: List<AidData>,
     val gpoData: GpoData?,
@@ -92,20 +93,6 @@ data class EmvCardSessionEntity(
     val totalApdus: Int,
     val totalTags: Int,
     val recordCount: Int
-)
-
-/**
- * EMV tag data structure (stored as JSON in allEmvTags map)
- */
-@Serializable
-data class EmvTagData(
-    val tag: String,  // "5A", "9F26", etc.
-    val name: String,  // "PAN", "ARQC", etc.
-    val value: String,  // Hex value
-    val valueDecoded: String?,  // Human-readable if applicable
-    val phase: String,  // Which phase captured this
-    val source: String?,  // "SFI 1 Record 1" if from record
-    val length: Int
 )
 
 /**
@@ -198,20 +185,14 @@ class EmvCardSessionConverters {
     // === Map<String, EmvTagData> ===
     
     @TypeConverter
-    fun fromEmvTagMap(value: Map<String, EmvTagData>): String {
-        return json.encodeToString(value)
+    fun fromEmvTagsMap(value: Map<String, EnrichedTagData>): String {
+        return Json.encodeToString(value)
     }
     
     @TypeConverter
-    fun toEmvTagMap(value: String): Map<String, EmvTagData> {
-        return try {
-            json.decodeFromString(value)
-        } catch (e: Exception) {
-            emptyMap()
-        }
-    }
-    
-    // === List<ApduLogEntry> ===
+    fun toEmvTagsMap(value: String): Map<String, EnrichedTagData> {
+        return Json.decodeFromString(value)
+    }    // === List<ApduLogEntry> ===
     
     @TypeConverter
     fun fromApduLogList(value: List<ApduLogEntry>): String {

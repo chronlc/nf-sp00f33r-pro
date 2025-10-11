@@ -2,6 +2,7 @@ package com.nfsp00f33r.app.cardreading
 
 import com.nfsp00f33r.app.security.RocaVulnerabilityAnalyzer
 import timber.log.Timber
+import kotlinx.serialization.Serializable
 
 /**
  * Professional EMV BER-TLV Parser with Comprehensive Tag Validation
@@ -901,4 +902,89 @@ object EmvTlvParser {
             return null
         }
     }
+    
+    /**
+     * THE UNIFIED PARSER - parse response and return decoded tags
+     * CardReadingViewModel extracts what it needs (AIDs, PDOL, AFL, etc.)
+     */
+    fun parseResponse(
+        response: ByteArray,
+        phase: String,
+        source: String? = null
+    ): EmvParseResponse {
+        val result = parseEmvTlvData(response, phase, validateTags = true)
+        val enrichedTags = mutableMapOf<String, EnrichedTagData>()
+        
+        for ((tag, hexValue) in result.tags) {
+            val tagName = EmvTagDictionary.getTagDescription(tag)
+            val decoded = decodeTagValue(tag, hexValue)
+            
+            enrichedTags[tag] = EnrichedTagData(
+                tag = tag,
+                name = tagName,
+                value = hexValue,
+                valueDecoded = decoded,
+                phase = phase,
+                source = source,
+                length = hexValue.length / 2
+            )
+        }
+        
+        return EmvParseResponse(tags = enrichedTags)
+    }
+    
+    /**
+     * Decode tag value based on tag type
+     */
+    private fun decodeTagValue(tag: String, hexValue: String): String? {
+        return try {
+            when (tag) {
+                // ASCII text tags
+                "50", "5F20", "5F2D", "5F50", "9F0B", "9F12" -> parseString(hexValue)
+                // Date tags (YYMMDD)
+                "5F24", "5F25", "9A" -> parseYymmdd(hexValue)
+                // Numeric tags
+                "9F02", "9F03", "9F1A", "5F2A", "9F36" -> parseNumeric(hexValue)?.toString()
+                // AIP capabilities
+                "82" -> {
+                    val aip = parseAip(hexValue)
+                    aip?.let { 
+                        buildString {
+                            if (it.sdaSupported) append("SDA ")
+                            if (it.ddaSupported) append("DDA ")
+                            if (it.cdaSupported) append("CDA ")
+                            if (it.cardholderVerificationSupported) append("CVM ")
+                        }.trim()
+                    }
+                }
+                // CID type
+                "9F27" -> parseCid(hexValue)?.acType
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 }
+
+/**
+ * Enriched tag data structure
+ */
+@Serializable
+data class EnrichedTagData(
+    val tag: String,
+    val name: String,
+    val value: String,
+    val valueDecoded: String?,
+    val phase: String,
+    val source: String?,
+    val length: Int
+)
+
+/**
+ * Parser response - just returns what was decoded
+ * CardReadingViewModel decides what to do with it
+ */
+data class EmvParseResponse(
+    val tags: Map<String, EnrichedTagData>  // All parsed tags with decoded values
+)
