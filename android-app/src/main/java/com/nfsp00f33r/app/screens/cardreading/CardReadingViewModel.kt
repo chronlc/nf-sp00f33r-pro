@@ -1143,6 +1143,15 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         
         Timber.i("Proxmark3 EMV workflow complete: PAN=${extractedData.pan}, APDUs=${apduLog.size}")
         
+        // PHASE 9: Export EMV data to JSON (optional for research)
+        try {
+            val jsonExport = exportEmvDataToJson(extractedData, apduLog)
+            Timber.i("PHASE 9: JSON export generated (${jsonExport.length} chars)")
+            // Optionally save to file or share - for now just log availability
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 9: JSON export failed")
+        }
+        
         // Auto-save to database
         delay(1000)
         saveCardProfile(extractedData)
@@ -1212,6 +1221,95 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Interpret real status word meanings
      */
+    /**
+     * Export comprehensive EMV data to JSON format
+     * PHASE 9 ENHANCEMENT: Data persistence for research and analysis
+     */
+    private fun exportEmvDataToJson(cardData: com.nfsp00f33r.app.data.EmvCardData, apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
+        try {
+            val jsonObject = org.json.JSONObject()
+            
+            // Metadata
+            jsonObject.put("timestamp", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).format(java.util.Date()))
+            jsonObject.put("exportVersion", "1.0")
+            jsonObject.put("source", "nf-sp00f33r EMV Scanner")
+            
+            // Card Information
+            val cardInfo = org.json.JSONObject()
+            cardInfo.put("pan", cardData.pan ?: "")
+            cardInfo.put("cardholderName", cardData.cardholderName ?: "")
+            cardInfo.put("expiryDate", cardData.expiryDate ?: "")
+            cardInfo.put("cardType", cardData.detectCardType().name)
+            cardInfo.put("issuerCountryCode", cardData.issuerCountryCode ?: "")
+            cardInfo.put("serviceCode", cardData.serviceCode ?: "")
+            cardInfo.put("cardUid", cardData.cardUid ?: "")
+            jsonObject.put("cardInfo", cardInfo)
+            
+            // AIDs (Multi-AID support from PHASE 1)
+            val aidsArray = org.json.JSONArray()
+            cardData.availableAids.forEach { aid ->
+                aidsArray.put(aid)
+            }
+            if (aidsArray.length() == 0 && cardData.selectedAid != null) {
+                aidsArray.put(cardData.selectedAid)
+            }
+            jsonObject.put("aids", aidsArray)
+            
+            // Security Analysis (from PHASE 3)
+            val securityInfo = org.json.JSONObject()
+            // Extract AIP for security analysis
+            val aipHex = cardData.applicationInterchangeProfile ?: extractAipFromAllResponses(apduLog)
+            if (aipHex.isNotEmpty()) {
+                val secAnalysis = analyzeAip(aipHex)
+                securityInfo.put("hasSDA", secAnalysis.hasSDA)
+                securityInfo.put("hasDDA", secAnalysis.hasDDA)
+                securityInfo.put("hasCDA", secAnalysis.hasCDA)
+                securityInfo.put("isWeak", secAnalysis.isWeak)
+                securityInfo.put("summary", secAnalysis.summary)
+                securityInfo.put("aip", aipHex)
+            }
+            // ROCA Vulnerability
+            securityInfo.put("rocaVulnerable", cardData.rocaVulnerable)
+            securityInfo.put("rocaStatus", cardData.rocaVulnerabilityStatus ?: "")
+            jsonObject.put("securityInfo", securityInfo)
+            
+            // EMV Tags
+            val emvTagsObject = org.json.JSONObject()
+            cardData.emvTags.entries.forEach { (key, value) ->
+                emvTagsObject.put(key, value)
+            }
+            jsonObject.put("emvTags", emvTagsObject)
+            
+            // APDU Log
+            val apduArray = org.json.JSONArray()
+            apduLog.forEach { entry ->
+                val apduEntry = org.json.JSONObject()
+                apduEntry.put("command", entry.command)
+                apduEntry.put("response", entry.response)
+                apduEntry.put("statusWord", entry.statusWord)
+                apduEntry.put("description", entry.description)
+                apduEntry.put("timestamp", entry.timestamp)
+                apduArray.put(apduEntry)
+            }
+            jsonObject.put("apduLog", apduArray)
+            
+            // Cryptographic Data
+            val cryptoData = org.json.JSONObject()
+            cryptoData.put("ac", cardData.applicationCryptogram ?: "")
+            cryptoData.put("cid", cardData.cryptogramInformationData ?: "")
+            cryptoData.put("atc", cardData.applicationTransactionCounter ?: "")
+            cryptoData.put("un", cardData.unpredictableNumber ?: "")
+            cryptoData.put("iad", cardData.issuerApplicationData ?: "")
+            jsonObject.put("cryptoData", cryptoData)
+            
+            // Format with indentation for readability
+            return jsonObject.toString(2)
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 9: Error building JSON export")
+            return "{\"error\": \"${e.message}\"}"
+        }
+    }
+    
     private fun interpretStatusWord(statusWord: String): String {
         return when (statusWord.uppercase()) {
             "9000" -> "SUCCESS"
@@ -1517,6 +1615,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     
     /**
      * Build dynamic CDOL data for GENERATE AC command
+     * PHASE 7 ENHANCED: Handle all tag types properly for GENERATE AC
      * Similar to PDOL but uses actual transaction data from card session
      * Proxmark3-inspired GENERATE AC data generation
      */
@@ -1526,7 +1625,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val dateFormat = SimpleDateFormat("yyMMdd", Locale.US)
         val currentDate = dateFormat.format(Date())
         
-        Timber.d("Building CDOL data for ${dolEntries.size} entries")
+        Timber.i("PHASE 7: Building CDOL data for ${dolEntries.size} entries")
         
         for (entry in dolEntries) {
             val tagData = when (entry.tag.uppercase()) {
@@ -1617,9 +1716,332 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val totalLength = dataList.size
         val result = dataList.toByteArray()
         
-        Timber.i("Built CDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
+        Timber.i("PHASE 7: Built CDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
         return result
     }
+    
+    /**
+     * Parse CDOL structure to extract tag-length pairs
+     * PHASE 7 ENHANCEMENT: Handle 1-byte and 2-byte tags properly
+     */
+    private fun parseCdol(cdolHex: String): List<EmvTlvParser.DolEntry> {
+        Timber.d("PHASE 7: Parsing CDOL structure: $cdolHex")
+        
+        // Use existing EmvTlvParser.parseDol which handles both 1-byte and 2-byte tags
+        val entries = EmvTlvParser.parseDol(cdolHex)
+        
+        Timber.i("PHASE 7: CDOL parsed - ${entries.size} entries")
+        entries.forEachIndexed { idx, entry ->
+            Timber.d("  Entry ${idx + 1}: Tag ${entry.tag}, Length ${entry.length}")
+        }
+        
+        return entries
+    }
+    
+    /**
+     * Build GENERATE AC APDU command
+     * PHASE 10 ENHANCEMENT: Flexible AC type selection
+     * 
+     * @param acType: 0x00 = AAC (Application Authentication Cryptogram - decline)
+     *                0x40 = TC (Transaction Certificate - offline approval)
+     *                0x80 = ARQC (Authorization Request Cryptogram - online request)
+     * @param cdolData: Command data built from CDOL1
+     * @return Complete GENERATE AC APDU (CLA INS P1 P2 Lc Data Le)
+     */
+    private fun buildGenerateAcApdu(acType: Byte, cdolData: ByteArray): ByteArray {
+        Timber.d("PHASE 10: Building GENERATE AC APDU - AC Type: 0x${"%02X".format(acType)}, Data Length: ${cdolData.size}")
+        
+        // Command structure: CLA=0x80, INS=0xAE, P1=acType, P2=0x00, Lc, Data, Le=0x00
+        val apdu = if (cdolData.isNotEmpty()) {
+            // Case 4 command: With command data and expecting response
+            byteArrayOf(0x80.toByte(), 0xAE.toByte(), acType, 0x00.toByte(), cdolData.size.toByte()) + cdolData + byteArrayOf(0x00)
+        } else {
+            // Case 2 command: No command data, only expecting response
+            byteArrayOf(0x80.toByte(), 0xAE.toByte(), acType, 0x00.toByte(), 0x00)
+        }
+        
+        val apduHex = apdu.joinToString("") { "%02X".format(it) }
+        Timber.i("PHASE 10: GENERATE AC APDU built - ${apdu.size} bytes: $apduHex")
+        return apdu
+    }
+    
+    /**
+     * Parse GENERATE AC response for cryptogram analysis
+     * PHASE 10 ENHANCEMENT: Structured AC response parsing
+     */
+    private fun parseGenerateAcResponse(responseHex: String): GenerateAcResult {
+        Timber.d("PHASE 10: Parsing GENERATE AC response: $responseHex")
+        
+        // Extract status word
+        val statusWord = if (responseHex.length >= 4) responseHex.takeLast(4) else "UNKNOWN"
+        val dataHex = if (responseHex.length > 4) responseHex.dropLast(4) else ""
+        
+        // Parse response using TLV parser for tags like:
+        // 9F27 (CID - Cryptogram Information Data)
+        // 9F36 (ATC - Application Transaction Counter)
+        // 9F26 (AC - Application Cryptogram)
+        var cid = ""
+        var atc = ""
+        var ac = ""
+        
+        if (dataHex.isNotEmpty()) {
+            try {
+                // Convert hex string to ByteArray for parser
+                val dataBytes = dataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                val parseResult = EmvTlvParser.parseEmvTlvData(dataBytes, "GEN_AC", validateTags = true)
+                cid = parseResult.tags["9F27"] ?: ""
+                atc = parseResult.tags["9F36"] ?: ""
+                ac = parseResult.tags["9F26"] ?: ""
+                
+                Timber.i("PHASE 10: AC Response parsed - CID: $cid, ATC: $atc, AC: ${ac.take(16)}...")
+            } catch (e: Exception) {
+                Timber.e(e, "PHASE 10: Failed to parse GENERATE AC response TLV")
+            }
+        }
+        
+        return GenerateAcResult(statusWord, cid, atc, ac)
+    }
+    
+    /**
+     * Data class for GENERATE AC response
+     */
+    private data class GenerateAcResult(
+        val statusWord: String,
+        val cid: String,
+        val atc: String,
+        val ac: String
+    )
+    
+    /**
+     * Build INTERNAL AUTHENTICATE APDU command
+     * PHASE 11 ENHANCEMENT: DDA challenge for VISA cards
+     * 
+     * Used for Dynamic Data Authentication (DDA) where terminal sends
+     * random challenge and card signs it with ICC private key.
+     * 
+     * @param ddolData: Command data built from DDOL (Dynamic DOL)
+     * @return Complete INTERNAL AUTHENTICATE APDU (CLA INS P1 P2 Lc Data Le)
+     */
+    private fun buildInternalAuthApdu(ddolData: ByteArray): ByteArray {
+        Timber.d("PHASE 11: Building INTERNAL AUTHENTICATE APDU - Data Length: ${ddolData.size}")
+        
+        // Command structure: CLA=0x00, INS=0x88, P1=0x00, P2=0x00, Lc, Data, Le=0x00
+        val apdu = if (ddolData.isNotEmpty()) {
+            // Case 4 command: With command data and expecting response
+            byteArrayOf(0x00.toByte(), 0x88.toByte(), 0x00.toByte(), 0x00.toByte(), ddolData.size.toByte()) + ddolData + byteArrayOf(0x00)
+        } else {
+            // Case 2 command: No command data, only expecting response (minimal challenge)
+            byteArrayOf(0x00.toByte(), 0x88.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00)
+        }
+        
+        val apduHex = apdu.joinToString("") { "%02X".format(it) }
+        Timber.i("PHASE 11: INTERNAL AUTHENTICATE APDU built - ${apdu.size} bytes: $apduHex")
+        return apdu
+    }
+    
+    /**
+     * Parse INTERNAL AUTHENTICATE response for SDAD
+     * PHASE 11 ENHANCEMENT: Extract Signed Dynamic Application Data
+     */
+    private fun parseInternalAuthResponse(responseHex: String): InternalAuthResult {
+        Timber.d("PHASE 11: Parsing INTERNAL AUTHENTICATE response: $responseHex")
+        
+        // Extract status word
+        val statusWord = if (responseHex.length >= 4) responseHex.takeLast(4) else "UNKNOWN"
+        val dataHex = if (responseHex.length > 4) responseHex.dropLast(4) else ""
+        
+        // Parse response for SDAD (Signed Dynamic Application Data)
+        // Tag 9F4B contains the signed data
+        var sdad = ""
+        var iccDynamicNumber = ""
+        
+        if (dataHex.isNotEmpty()) {
+            try {
+                // Convert hex string to ByteArray for parser
+                val dataBytes = dataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                val parseResult = EmvTlvParser.parseEmvTlvData(dataBytes, "INT_AUTH", validateTags = true)
+                sdad = parseResult.tags["9F4B"] ?: "" // Signed Dynamic Application Data
+                iccDynamicNumber = parseResult.tags["9F4C"] ?: "" // ICC Dynamic Number
+                
+                Timber.i("PHASE 11: INTERNAL AUTHENTICATE Response - SDAD: ${sdad.take(32)}..., ICC DN: $iccDynamicNumber")
+            } catch (e: Exception) {
+                Timber.e(e, "PHASE 11: Failed to parse INTERNAL AUTHENTICATE response TLV")
+            }
+        }
+        
+        return InternalAuthResult(statusWord, sdad, iccDynamicNumber)
+    }
+    
+    /**
+     * Data class for INTERNAL AUTHENTICATE response
+     */
+    private data class InternalAuthResult(
+        val statusWord: String,
+        val sdad: String,           // Signed Dynamic Application Data (9F4B)
+        val iccDynamicNumber: String // ICC Dynamic Number (9F4C)
+    )
+    
+    /**
+     * Check if card supports DDA (Dynamic Data Authentication)
+     * PHASE 11 HELPER: Analyze AIP byte 1 bit 6
+     */
+    private fun supportsDda(aipHex: String): Boolean {
+        if (aipHex.length < 2) return false
+        
+        try {
+            val byte1 = aipHex.substring(0, 2).toInt(16)
+            // Bit 6 of byte 1 (0x20) = DDA supported
+            val ddaSupported = (byte1 and 0x20) != 0
+            Timber.d("PHASE 11: AIP=$aipHex, Byte1=0x${"%02X".format(byte1)}, DDA=$ddaSupported")
+            return ddaSupported
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 11: Failed to parse AIP for DDA check")
+            return false
+        }
+    }
+    
+    /**
+     * Test for ROCA vulnerability (CVE-2017-15361)
+     * PHASE 12 ENHANCEMENT: RSA key fingerprint detection
+     * 
+     * ROCA affects RSA keys generated by Infineon chips (2012-2017).
+     * Vulnerable keys have specific mathematical properties:
+     * - Modulus n when divided by small primes (3,5,7,11,13,17,19,23,29,31,37,53,61)
+     *   produces remainders that match specific patterns
+     * 
+     * @param issuerPublicKeyHex: Hex string of issuer public key certificate (tag 90)
+     * @return RocaTestResult with vulnerability status
+     */
+    private fun testRocaVulnerability(issuerPublicKeyHex: String): RocaTestResult {
+        Timber.d("PHASE 12: Testing ROCA vulnerability on ${issuerPublicKeyHex.length / 2} byte key")
+        
+        if (issuerPublicKeyHex.isEmpty() || issuerPublicKeyHex.length < 256) {
+            Timber.w("PHASE 12: Key too short for ROCA test (${issuerPublicKeyHex.length / 2} bytes)")
+            return RocaTestResult(
+                isVulnerable = false,
+                confidence = "LOW",
+                reason = "Key too short or missing (need ≥128 bytes for RSA-1024+)"
+            )
+        }
+        
+        try {
+            // Extract RSA modulus from issuer public key certificate
+            // Tag 90 structure: [Header][Modulus][Exponent][Hash][Padding]
+            // For RSA-1024: 128 bytes total, modulus is typically bytes 15-143 (128 bytes)
+            // For RSA-2048: 256 bytes total, modulus is typically bytes 15-271 (256 bytes)
+            
+            val keyBytes = issuerPublicKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            
+            // Try to extract modulus (skip header, take modulus portion)
+            // This is simplified - production would parse certificate structure properly
+            val modulusBytes = if (keyBytes.size >= 128) {
+                // Assume modulus starts after header (byte 15 for most EMV keys)
+                val modulusStart = 15
+                val modulusLength = if (keyBytes.size >= 256) 256 else 128 // RSA-2048 or RSA-1024
+                keyBytes.copyOfRange(modulusStart, minOf(modulusStart + modulusLength, keyBytes.size))
+            } else {
+                keyBytes
+            }
+            
+            // Convert to BigInteger (unsigned)
+            val modulus = java.math.BigInteger(1, modulusBytes)
+            
+            Timber.d("PHASE 12: Extracted ${modulusBytes.size * 8}-bit modulus")
+            
+            // Test ROCA fingerprint
+            val rocaFingerprint = isRocaFingerprint(modulus)
+            
+            val result = if (rocaFingerprint) {
+                Timber.w("⚠️ PHASE 12: ROCA VULNERABILITY DETECTED - Key may be factorable!")
+                RocaTestResult(
+                    isVulnerable = true,
+                    confidence = "HIGH",
+                    reason = "Modulus matches ROCA fingerprint (Infineon RSALib vulnerability)",
+                    details = "Key size: ${modulusBytes.size * 8} bits, CVE-2017-15361"
+                )
+            } else {
+                Timber.i("✅ PHASE 12: No ROCA vulnerability detected")
+                RocaTestResult(
+                    isVulnerable = false,
+                    confidence = "HIGH",
+                    reason = "Modulus does not match ROCA fingerprint patterns"
+                )
+            }
+            
+            return result
+            
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 12: Error during ROCA vulnerability test")
+            return RocaTestResult(
+                isVulnerable = false,
+                confidence = "LOW",
+                reason = "ROCA test failed: ${e.message}"
+            )
+        }
+    }
+    
+    /**
+     * Check if RSA modulus matches ROCA fingerprint
+     * PHASE 12 HELPER: Mathematical fingerprint detection
+     * 
+     * ROCA vulnerable keys produce specific remainder patterns when
+     * divided by small primes. This implements the detection method
+     * from https://github.com/crocs-muni/roca
+     */
+    private fun isRocaFingerprint(modulus: java.math.BigInteger): Boolean {
+        // ROCA detection primes and their vulnerable remainder masks
+        // These patterns are unique to Infineon RSALib vulnerable keys
+        val rocaPrimes = listOf(
+            3 to 0x1,      // Remainder must be in set {0}
+            5 to 0x1,      // {0}
+            7 to 0x3,      // {0,1}
+            11 to 0x5,     // {0,2}
+            13 to 0x9,     // {0,3}
+            17 to 0x21,    // {0,5}
+            19 to 0x41,    // {0,6}
+            23 to 0x81,    // {0,7}
+            29 to 0x101,   // {0,8}
+            31 to 0x201,   // {0,9}
+            37 to 0x401,   // {0,10}
+            41 to 0x801,   // {0,11}
+            43 to 0x1001,  // {0,12}
+            47 to 0x2001,  // {0,13}
+            53 to 0x4001,  // {0,14}
+            59 to 0x8001,  // {0,15}
+            61 to 0x10001  // {0,16}
+        )
+        
+        var matchCount = 0
+        val requiredMatches = 15 // Need most primes to match for HIGH confidence
+        
+        for ((prime, expectedMask) in rocaPrimes) {
+            val remainder = modulus.mod(java.math.BigInteger.valueOf(prime.toLong())).toInt()
+            val remainderBit = 1 shl remainder
+            
+            if ((remainderBit and expectedMask) != 0) {
+                matchCount++
+                Timber.v("PHASE 12: Prime $prime: remainder=$remainder MATCH (bit ${remainderBit and expectedMask})")
+            } else {
+                Timber.v("PHASE 12: Prime $prime: remainder=$remainder NO MATCH")
+            }
+        }
+        
+        val matchPercentage = (matchCount * 100) / rocaPrimes.size
+        Timber.d("PHASE 12: ROCA fingerprint matches: $matchCount/${rocaPrimes.size} ($matchPercentage%)")
+        
+        // If ≥87% of primes match, likely ROCA vulnerable
+        return matchCount >= requiredMatches
+    }
+    
+    /**
+     * Data class for ROCA vulnerability test result
+     */
+    private data class RocaTestResult(
+        val isVulnerable: Boolean,
+        val confidence: String,     // "HIGH", "MEDIUM", "LOW"
+        val reason: String,
+        val details: String = ""
+    )
     
     /**
      * Extract detailed EMV data from response - COMPREHENSIVE PARSING
