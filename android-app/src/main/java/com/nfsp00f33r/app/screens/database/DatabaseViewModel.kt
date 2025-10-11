@@ -11,6 +11,7 @@ import com.nfsp00f33r.app.storage.CardDataStore
 import com.nfsp00f33r.app.storage.CardProfileAdapter
 import com.nfsp00f33r.app.storage.emv.EmvSessionDatabase
 import com.nfsp00f33r.app.storage.emv.EmvCardSessionEntity
+import com.nfsp00f33r.app.storage.emv.EmvSessionExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -196,28 +197,27 @@ class DatabaseViewModel(private val context: Context) : ViewModel() {
     /**
      * Export all card data to JSON (PHASE 5: Will be replaced with Proxmark3 JSON export)
      */
-    fun exportToJson(): String {
-        return try {
-            // TODO PHASE 5: Use EmvSessionExporter.toProxmark3Json()
-            val appProfiles = cardProfiles
-            
-            // Create JSON export
-            val profiles = appProfiles.map { profile ->
-                """
-                {
-                    "id": "${profile.id}",
-                    "pan": "${profile.emvCardData.pan ?: ""}",
-                    "cardholderName": "${profile.emvCardData.cardholderName ?: ""}",
-                    "track2": "${profile.emvCardData.track2Data ?: ""}",
-                    "apduLogs": ${profile.apduLogs.size},
-                    "createdAt": "${profile.createdTimestamp}"
+    /**
+     * Export all sessions to Proxmark3-compatible JSON
+     * PHASE 5: Uses EmvSessionExporter for complete session export
+     */
+    fun exportToJson(callback: (String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // PHASE 5: Use EmvSessionExporter for Proxmark3-compatible export
+                val jsonExport = EmvSessionExporter.exportAllSessions(emvSessionDao)
+                
+                withContext(Dispatchers.Main) {
+                    callback(jsonExport)
                 }
-                """.trimIndent()
+                
+                Timber.d("Exported all sessions to JSON (${jsonExport.length} characters)")
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to export to JSON")
+                withContext(Dispatchers.Main) {
+                    callback("{\"error\": \"Export failed: ${e.message}\"}")
+                }
             }
-            "[${profiles.joinToString(",\n")}]"
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to export to JSON")
-            "[]"
         }
     }
     
