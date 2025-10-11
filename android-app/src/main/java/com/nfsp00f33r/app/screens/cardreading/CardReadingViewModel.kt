@@ -54,6 +54,18 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val priority: Int          // Application Priority (tag 87) or 0
     )
     
+    /**
+     * Security information extracted from AIP (Application Interchange Profile)
+     * PHASE 3 ENHANCEMENT: Analyze authentication capabilities
+     */
+    data class SecurityInfo(
+        val hasSDA: Boolean,       // Static Data Authentication supported (bit 6)
+        val hasDDA: Boolean,       // Dynamic Data Authentication supported (bit 5)
+        val hasCDA: Boolean,       // Combined DDA/AC Generation supported (bit 0)
+        val isWeak: Boolean,       // True if no strong auth (no SDA/DDA/CDA)
+        val summary: String        // Human-readable summary
+    )
+    
     // Hardware and reader management - Phase 2B Day 1: Migrated to PN532DeviceModule
     private val pn532Module by lazy {
         NfSp00fApplication.getPN532Module()
@@ -554,7 +566,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                         val aip = extractAipFromResponse(gpoHex)
                         val afl = extractAflFromResponse(gpoHex)
                         
-                        // Parse AIP for capability detection
+                        // PHASE 3: Parse AIP for security analysis
                         if (aip.isNotEmpty()) {
                             val aipCapabilities = EmvTlvParser.parseAip(aip)
                             aipCapabilities?.let { cap ->
@@ -568,6 +580,17 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                                 withContext(Dispatchers.Main) {
                                     statusMessage = "GPO: ${authMethods.joinToString("/")} ${if (cap.cardholderVerificationSupported) "+CVM" else ""}"
                                 }
+                            }
+                            
+                            // PHASE 3: Enhanced security analysis using analyzeAip
+                            val securityInfo = analyzeAip(aip)
+                            if (securityInfo.isWeak) {
+                                Timber.w("PHASE 3 SECURITY ALERT: ${securityInfo.summary}")
+                                withContext(Dispatchers.Main) {
+                                    statusMessage += " [${securityInfo.summary}]"
+                                }
+                            } else {
+                                Timber.i("PHASE 3: ${securityInfo.summary}")
                             }
                         }
                         
@@ -937,42 +960,141 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 Timber.e("GENERATE AC command failed - no response")
             }
             
-            // Phase 6: GET DATA for specific EMV tags (PROXMARK3 style)
+            // PHASE 4: GET DATA for specific EMV tags (Proxmark3-style primitives)
             withContext(Dispatchers.Main) {
                 currentPhase = "GET DATA"
                 progress = 0.85f
-                statusMessage = "Getting EMV data..."
+                statusMessage = "Extracting primitives..."
             }
             
+            // PHASE 4: Enhanced GET DATA tags for research
             val emvTags = listOf(
-                "9F13", // Last Online ATC
+                "9F36", // Application Transaction Counter (ATC)
+                "9F13", // Last Online ATC Register
                 "9F17", // PIN Try Counter
-                "9F36", // Application Transaction Counter
+                "9F4D", // Log Entry
                 "9F4F"  // Log Format
             )
             
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 4: GET DATA PRIMITIVES")
+            var getDataSuccessCount = 0
+            
             for (tag in emvTags) {
-                val getDataCommand = byteArrayOf(0x80.toByte(), 0xCA.toByte(), 
-                    tag.substring(0, 2).toInt(16).toByte(),
-                    tag.substring(2, 4).toInt(16).toByte(),
-                    0x00)
+                val getDataCommand = buildGetDataApdu(tag.toInt(16))
                 val getDataResponse = if (isoDep != null) isoDep.transceive(getDataCommand) else null
                 
                 if (getDataResponse != null) {
                     val getDataHex = getDataResponse.joinToString("") { "%02X".format(it) }
                     val realStatusWord = if (getDataHex.length >= 4) getDataHex.takeLast(4) else "UNKNOWN"
                     addApduLogEntry(
-                        "80CA" + tag + "00",
+                        getDataCommand.joinToString("") { "%02X".format(it) },
                         getDataHex,
                         realStatusWord,
                         "GET DATA $tag",
                         0L
                     )
                     
-                    if (realStatusWord == "9000") {
-                        displayParsedData("GET_DATA_$tag", getDataHex)
+                    when (realStatusWord) {
+                        "9000" -> {
+                            displayParsedData("GET_DATA_$tag", getDataHex)
+                            getDataSuccessCount++
+                            
+                            // Parse specific tag data
+                            val dataOnly = if (getDataHex.length > 4) getDataHex.dropLast(4) else ""
+                            when (tag) {
+                                "9F36" -> Timber.i("✓ ATC (9F36): $dataOnly")
+                                "9F13" -> Timber.i("✓ Last Online ATC (9F13): $dataOnly")
+                                "9F17" -> Timber.i("✓ PIN Try Counter (9F17): $dataOnly")
+                                "9F4D" -> Timber.i("✓ Log Entry (9F4D): $dataOnly")
+                                "9F4F" -> {
+                                    Timber.i("✓ Log Format (9F4F): $dataOnly")
+                                    // PHASE 5 prep: Store for transaction log reading
+                                }
+                            }
+                        }
+                        "6A88" -> Timber.w("✗ Tag $tag: Referenced data not found")
+                        "6A81" -> Timber.w("✗ Tag $tag: Function not supported")
+                        else -> Timber.w("✗ Tag $tag: Failed with SW=$realStatusWord")
                     }
+                } else {
+                    Timber.e("✗ Tag $tag: No response from card")
                 }
+            }
+            
+            Timber.i("PHASE 4 COMPLETE: $getDataSuccessCount/${emvTags.size} primitives extracted")
+            Timber.i("=".repeat(80))
+            
+            // PHASE 5: Transaction Log Reading (if Log Format tag 9F4F found)
+            val logFormat = extractLogFormatFromAllResponses(apduLog)
+            if (logFormat.isNotEmpty() && logFormat.length >= 4) {
+                Timber.i("=".repeat(80))
+                Timber.i("PHASE 5: TRANSACTION LOG READING")
+                
+                try {
+                    // Parse Log Format (tag 9F4F): byte 0 = SFI (bits 3-7), byte 1 = record count
+                    val logFormatBytes = logFormat.chunked(2).map { it.toInt(16) }
+                    val logSfi = (logFormatBytes[0] shr 3) and 0x1F
+                    val logRecordCount = if (logFormatBytes.size > 1) logFormatBytes[1] else 0
+                    
+                    Timber.i("Log Format: SFI=$logSfi, Record Count=$logRecordCount")
+                    
+                    if (logSfi > 0 && logRecordCount > 0 && logRecordCount <= 10) {
+                        withContext(Dispatchers.Main) {
+                            currentPhase = "Transaction Logs"
+                            progress = 0.9f
+                            statusMessage = "Reading $logRecordCount transaction logs..."
+                        }
+                        
+                        var logsRead = 0
+                        for (recNum in 1..logRecordCount) {
+                            val readLogCommand = byteArrayOf(
+                                0x00,                           // CLA
+                                0xB2.toByte(),                  // INS (READ RECORD)
+                                recNum.toByte(),                // P1 (record number)
+                                ((logSfi shl 3) or 0x04).toByte(), // P2 (SFI + read mode)
+                                0x00                            // Le
+                            )
+                            
+                            val logResponse = if (isoDep != null) isoDep.transceive(readLogCommand) else null
+                            
+                            if (logResponse != null) {
+                                val logHex = logResponse.joinToString("") { "%02X".format(it) }
+                                val logSw = if (logHex.length >= 4) logHex.takeLast(4) else "UNKNOWN"
+                                
+                                addApduLogEntry(
+                                    readLogCommand.joinToString("") { "%02X".format(it) },
+                                    logHex,
+                                    logSw,
+                                    "READ TRANSACTION LOG #$recNum",
+                                    0L
+                                )
+                                
+                                if (logSw == "9000") {
+                                    logsRead++
+                                    displayParsedData("TRANSACTION_LOG_$recNum", logHex)
+                                    
+                                    // Parse transaction log fields (simplified)
+                                    val logData = if (logHex.length > 4) logHex.dropLast(4) else ""
+                                    Timber.i("✓ Transaction Log #$recNum: $logData")
+                                    // Could parse: amount, date, ATC, country code, etc.
+                                } else {
+                                    Timber.w("✗ Transaction Log #$recNum: Failed with SW=$logSw")
+                                }
+                            }
+                        }
+                        
+                        Timber.i("PHASE 5 COMPLETE: $logsRead/$logRecordCount transaction logs read")
+                    } else {
+                        Timber.w("PHASE 5: Invalid log parameters - SFI=$logSfi, Count=$logRecordCount (SKIPPED)")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "PHASE 5: Error reading transaction logs")
+                }
+                
+                Timber.i("=".repeat(80))
+            } else {
+                Timber.i("PHASE 5: No Log Format (9F4F) found - skipping transaction log reading")
             }
             
             // Phase 6: Final Processing
@@ -1217,27 +1339,67 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Parse AFL to determine which records to read - LIVE ANALYSIS
      */
+    /**
+     * Parse AFL for record reading - ENHANCED to read ALL records from ALL SFIs
+     * Proxmark3-inspired: Complete AFL traversal for full data extraction
+     * PHASE 2 ENHANCEMENT
+     */
     private fun parseAflForRecords(afl: String): List<Triple<Int, Int, Int>> {
         val records = mutableListOf<Triple<Int, Int, Int>>()
         try {
-            if (afl.length >= 8) {
-                // AFL format: SFI + Start Record + End Record + Offline Auth Records
-                for (i in 0 until afl.length step 8) {
-                    if (i + 7 < afl.length) {
-                        val sfi = afl.substring(i, i + 2).toInt(16) shr 3 // Upper 5 bits
-                        val startRecord = afl.substring(i + 2, i + 4).toInt(16)
-                        val endRecord = afl.substring(i + 4, i + 6).toInt(16)
-                        
+            if (afl.length >= 8 && afl.length % 8 == 0) {
+                // AFL format: Each 4-byte entry = SFI + Start Record + End Record + Offline Auth Records
+                val numEntries = afl.length / 8
+                Timber.d("PHASE 2: Parsing AFL with $numEntries entries for COMPLETE record extraction")
+                
+                for (i in 0 until numEntries) {
+                    val offset = i * 8
+                    val entryHex = afl.substring(offset, offset + 8)
+                    
+                    val sfi = afl.substring(offset, offset + 2).toInt(16) shr 3 // Upper 5 bits
+                    val startRecord = afl.substring(offset + 2, offset + 4).toInt(16)
+                    val endRecord = afl.substring(offset + 4, offset + 6).toInt(16)
+                    val offlineRecords = afl.substring(offset + 6, offset + 8).toInt(16)
+                    
+                    Timber.d("AFL Entry ${i + 1}/$numEntries: SFI=$sfi, Records $startRecord-$endRecord, Offline=$offlineRecords")
+                    
+                    // Validate record range
+                    if (startRecord > 0 && endRecord >= startRecord && sfi > 0 && sfi <= 31) {
+                        // Read ALL records from startRecord to endRecord (inclusive)
                         for (record in startRecord..endRecord) {
-                            records.add(Triple(sfi, record, (sfi shl 3) or 4)) // P2 = (SFI << 3) | 4
+                            val p2 = (sfi shl 3) or 0x04 // P2 = (SFI << 3) | 4
+                            records.add(Triple(sfi, record, p2))
+                            Timber.d("  Will read: SFI $sfi, Record $record, P2=0x${p2.toString(16).uppercase().padStart(2, '0')}")
                         }
+                    } else {
+                        Timber.w("AFL Entry ${i + 1}: Invalid range - SFI=$sfi, Records $startRecord-$endRecord (SKIPPED)")
                     }
                 }
+                
+                Timber.i("PHASE 2: AFL parsing complete - ${records.size} total records scheduled for reading")
+            } else {
+                Timber.w("PHASE 2: AFL length invalid (${afl.length} bytes, expected multiple of 8)")
             }
         } catch (e: Exception) {
-            Timber.e(e, "Error parsing AFL")
+            Timber.e(e, "PHASE 2: Error parsing AFL - ${e.message}")
         }
         return records
+    }
+    
+    /**
+     * Build GET DATA APDU command for specific tag
+     * PHASE 4 ENHANCEMENT: Proxmark3-style primitive extraction
+     */
+    private fun buildGetDataApdu(tag: Int): ByteArray {
+        val tagByte1 = (tag shr 8) and 0xFF
+        val tagByte2 = tag and 0xFF
+        return byteArrayOf(
+            0x80.toByte(),            // CLA
+            0xCA.toByte(),            // INS (GET DATA)
+            tagByte1.toByte(),        // P1 (high byte of tag)
+            tagByte2.toByte(),        // P2 (low byte of tag)
+            0x00                      // Le (expect up to 256 bytes)
+        )
     }
     
     /**
@@ -1765,6 +1927,72 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return ""
     }
     
+    /**
+     * Analyze AIP (Application Interchange Profile) for security capabilities
+     * PHASE 3 ENHANCEMENT: Detect SDA/DDA/CDA support and flag weak cards
+     * Proxmark3-inspired security analysis
+     */
+    private fun analyzeAip(aipHex: String): SecurityInfo {
+        if (aipHex.length < 4) {
+            return SecurityInfo(
+                hasSDA = false,
+                hasDDA = false,
+                hasCDA = false,
+                isWeak = true,
+                summary = "Invalid AIP (too short)"
+            )
+        }
+        
+        try {
+            // AIP is 2 bytes, parse first byte for authentication bits
+            val byte1 = aipHex.substring(0, 2).toInt(16)
+            val byte2 = if (aipHex.length >= 4) aipHex.substring(2, 4).toInt(16) else 0
+            
+            // Byte 1 authentication flags (EMV Book 3 Table 16)
+            val hasSDA = (byte1 and 0x40) != 0  // Bit 6: SDA supported
+            val hasDDA = (byte1 and 0x20) != 0  // Bit 5: DDA supported
+            val hasCDA = (byte1 and 0x01) != 0  // Bit 0: CDA supported
+            
+            // Card is weak if it has NO strong authentication
+            val isWeak = !hasSDA && !hasDDA && !hasCDA
+            
+            // Build human-readable summary
+            val authMethods = mutableListOf<String>()
+            if (hasSDA) authMethods.add("SDA")
+            if (hasDDA) authMethods.add("DDA")
+            if (hasCDA) authMethods.add("CDA")
+            
+            val summary = when {
+                isWeak -> "⚠️ WEAK: No strong authentication"
+                hasCDA -> "✓ STRONG: CDA (best)"
+                hasDDA -> "✓ STRONG: DDA"
+                hasSDA -> "✓ MODERATE: SDA only"
+                else -> "Unknown authentication"
+            }
+            
+            Timber.d("PHASE 3: AIP Analysis - Byte1=0x${byte1.toString(16).uppercase().padStart(2, '0')}, " +
+                     "Byte2=0x${byte2.toString(16).uppercase().padStart(2, '0')}")
+            Timber.i("PHASE 3: Auth Methods: ${if (authMethods.isEmpty()) "NONE" else authMethods.joinToString(", ")} - $summary")
+            
+            return SecurityInfo(
+                hasSDA = hasSDA,
+                hasDDA = hasDDA,
+                hasCDA = hasCDA,
+                isWeak = isWeak,
+                summary = summary
+            )
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 3: Error analyzing AIP")
+            return SecurityInfo(
+                hasSDA = false,
+                hasDDA = false,
+                hasCDA = false,
+                isWeak = true,
+                summary = "Error parsing AIP: ${e.message}"
+            )
+        }
+    }
+    
     private fun extractAflFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
         apduLog.forEach { apdu ->
             val aflRegex = "94([0-9A-F]{2})([0-9A-F]+)".toRegex()
@@ -1789,16 +2017,93 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return ""
     }
     
+    /**
+     * Extract and parse CVM List (tag 8E) - ENHANCED for PHASE 6
+     * Proxmark3-inspired CVM analysis for verification research
+     */
     private fun extractCvmListFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
         apduLog.forEach { apdu ->
             val cvmRegex = "8E([0-9A-F]{2})([0-9A-F]+)".toRegex()
             val match = cvmRegex.find(apdu.response)
             if (match != null) {
                 val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
+                val cvmData = match.groupValues[2].take(length)
+                
+                // PHASE 6: Parse and log CVM structure
+                if (cvmData.length >= 16) { // Minimum: 4 bytes X + 4 bytes Y + 2 bytes rule
+                    try {
+                        val amountX = cvmData.substring(0, 8)
+                        val amountY = cvmData.substring(8, 16)
+                        val cvmRules = cvmData.substring(16)
+                        
+                        Timber.i("PHASE 6: CVM List Found")
+                        Timber.i("  Amount X (No CVM below): $amountX")
+                        Timber.i("  Amount Y (Online PIN): $amountY")
+                        Timber.i("  CVM Rules: $cvmRules")
+                        
+                        // Parse CVM rules (2 bytes per rule: code + condition)
+                        if (cvmRules.length >= 4) {
+                            var ruleNum = 1
+                            for (i in 0 until cvmRules.length step 4) {
+                                if (i + 3 < cvmRules.length) {
+                                    val cvmCode = cvmRules.substring(i, i + 2)
+                                    val cvmCondition = cvmRules.substring(i + 2, i + 4)
+                                    val decoded = decodeCvmRule(cvmCode, cvmCondition)
+                                    Timber.i("  Rule $ruleNum: $cvmCode/$cvmCondition = $decoded")
+                                    ruleNum++
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Timber.e(e, "PHASE 6: Error parsing CVM list")
+                    }
+                }
+                
+                return cvmData
             }
         }
         return ""
+    }
+    
+    /**
+     * Decode CVM rule code and condition to human-readable format
+     * PHASE 6 ENHANCEMENT: PIN/Signature/NoPIN mappings
+     */
+    private fun decodeCvmRule(cvmCode: String, cvmCondition: String): String {
+        val codeInt = try { cvmCode.toInt(16) } catch (e: Exception) { -1 }
+        val conditionInt = try { cvmCondition.toInt(16) } catch (e: Exception) { -1 }
+        
+        // Decode CVM code (EMV Book 3 Annex C3)
+        val cvmMethod = when (codeInt and 0x3F) {
+            0x00 -> "Fail CVM"
+            0x01 -> "Plaintext PIN (ICC)"
+            0x02 -> "Enciphered PIN (Online)"
+            0x03 -> "Plaintext PIN (ICC) + Signature"
+            0x04 -> "Enciphered PIN (ICC)"
+            0x05 -> "Enciphered PIN (ICC) + Signature"
+            0x1E -> "Signature"
+            0x1F -> "No CVM Required"
+            else -> "Unknown CVM (0x${cvmCode})"
+        }
+        
+        // Decode condition (EMV Book 3 Table 42)
+        val condition = when (conditionInt) {
+            0x00 -> "Always"
+            0x01 -> "If unattended cash"
+            0x02 -> "If not (unattended cash or manual cash or cashback)"
+            0x03 -> "If terminal supports CVM"
+            0x04 -> "If manual cash"
+            0x05 -> "If cashback"
+            0x06 -> "If transaction in app currency and under X"
+            0x07 -> "If transaction in app currency and over X"
+            0x08 -> "If transaction in app currency and under Y"
+            0x09 -> "If transaction in app currency and over Y"
+            else -> "Unknown condition (0x${cvmCondition})"
+        }
+        
+        val failFlag = if ((codeInt and 0x40) != 0) " [Apply Next if Fail]" else " [Fail Entire TX if Fail]"
+        
+        return "$cvmMethod, $condition$failFlag"
     }
     
     private fun extractIadFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
@@ -1841,6 +2146,22 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         apduLog.forEach { apdu ->
             val atcRegex = "9F36([0-9A-F]{2})([0-9A-F]+)".toRegex()
             val match = atcRegex.find(apdu.response)
+            if (match != null) {
+                val length = match.groupValues[1].toInt(16) * 2
+                return match.groupValues[2].take(length)
+            }
+        }
+        return ""
+    }
+    
+    /**
+     * Extract Log Format (tag 9F4F) from APDU responses
+     * PHASE 5 ENHANCEMENT: Used for transaction log reading
+     */
+    private fun extractLogFormatFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
+        apduLog.forEach { apdu ->
+            val logFormatRegex = "9F4F([0-9A-F]{2})([0-9A-F]+)".toRegex()
+            val match = logFormatRegex.find(apdu.response)
             if (match != null) {
                 val length = match.groupValues[1].toInt(16) * 2
                 return match.groupValues[2].take(length)
