@@ -4,6 +4,50 @@ All notable changes to nf-sp00f33r EMV Security Research Platform.
 
 ---
 
+## [v1.1.0] - 2025-10-11
+
+### 🏗️ Major Architecture Refactor - PmEmvReader Integration
+
+**Breaking Changes:**
+- CardReadingViewModel reduced from 4,268 lines to 980 lines (77% reduction)
+- Removed massive 1,200-line monolithic `executeProxmark3EmvWorkflow` function
+- Replaced with clean 80-line implementation using modular PmEmvReader
+
+**Added:**
+- **PmEmvReader.kt** (1,141 lines) - Proxmark3-style EMV reader module
+  - Complete EMV workflow: PPSE → AID → GPO → Records → Auth → AC
+  - Transaction types: TT_MSD, TT_QVSDCMCHIP, TT_CDA, TT_VSDC
+  - Singleton EmvTlvParser integration
+  - Timber logging throughout
+  
+- **PmSessionAdapter.kt** (454 lines) - Database adapter
+  - Converts PmEmvReader.EmvSession to EmvCardSessionEntity
+  - Maps all 25+ required database schema fields
+  - Smart defaults: card brand detection, PAN masking, AIP parsing
+  - Converts TLV database to EnrichedTagData map
+  - Converts APDU log to ApduLogEntry list
+
+- **Transaction Type Selection** - UI control for EMV transaction modes
+- **Code Generation Rules** - Condensed systematic development guidelines
+  - Copilot-friendly version (300 lines)
+  - MCP ultra-condensed version (100 lines)
+  - 7-step process preserved (Scope, Consumer Impact, Mapping, Reading, Interface, Generation, Validation)
+  - 5 principles intact (Explicit, Read, Map, Validate, Ripple Effect)
+
+**Improved:**
+- Clean modular architecture: ViewModel → PmEmvReader → Database
+- Build SUCCESS (75MB APK generated)
+- First-try compilation with systematic approach
+- Repository structure cleaned and organized
+
+**Infrastructure:**
+- Organized docs into structured subdirectories (analysis, guides, reports, archive)
+- Restricted git tracking to only /android-app/ and /.github/
+- Documentation files moved to root for better visibility
+- Cleaned .gitignore for focused repository
+
+---
+
 ## [Unreleased]
 
 ### In Progress
