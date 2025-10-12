@@ -6,7 +6,6 @@
 /.vscode/
 /scripts/
 /.venv/
-/.github/
 /gradle/
 /.gradle/
 build.gradle
