@@ -18,6 +18,9 @@
 !/CHANGELOG.md
 !/FEATURES.md
 
+# Except releases directory
+!/releases/
+
 # Android Build Files
 *.iml
 .gradle
