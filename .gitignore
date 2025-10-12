@@ -13,6 +13,11 @@
 # Except .github directory (for CI/CD and instructions)
 !/.github/
 
+# Except root documentation files
+!/README.md
+!/CHANGELOG.md
+!/FEATURES.md
+
 # Android Build Files
 *.iml
 .gradle
