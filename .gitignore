@@ -151,6 +151,5 @@ Thumbs.db
 *.p12
 secrets.properties
 
-# Generated documentation files (organized in docs/ subdirectories)
-docs/analysis/
-docs/archive/
+# Generated documentation (entire docs folder)
+/docs/
