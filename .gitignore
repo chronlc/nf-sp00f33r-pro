@@ -151,13 +151,6 @@ Thumbs.db
 *.p12
 secrets.properties
 
-# Analysis and guide markdown files (generated documentation)
-CLEAN_ARCHITECTURE.md
-COMPLETE_EMV_WORKFLOW.md
-INTEGRATION_COMPLETE.md
-LATEST_SCAN_ANALYSIS.md
-PM_EMV_READER_QA.md
-PROXMARK3_INTEGRATION_GUIDE.md
-PROXMARK3_VISA_ANALYSIS.md
-PROXMARK3_WORKFLOW_DETECTION.md
-RFIDIOT_VISA_ANALYSIS.md
+# Generated documentation files (organized in docs/ subdirectories)
+docs/analysis/
+docs/archive/
