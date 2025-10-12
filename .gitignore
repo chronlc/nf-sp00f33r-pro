@@ -1,24 +1,17 @@
 # nf-sp00f33r-pro .gitignore
-# Repository scope: /android-app/ only
+# Repository scope: ONLY /android-app/ directory is tracked
 
-# Root-level exclusions (non-android-app directories)
-/backups/
-/.vscode/
-/scripts/
-/.venv/
-/gradle/
-/.gradle/
-build.gradle
-settings.gradle
-gradle.properties
-gradlew
-gradlew.bat
-requirements.txt
-*.sh
-threading_fixes.txt
-setup_pn532_testing.sh
-test_dashboard_cardreading.sh
-*.zip
+# Ignore everything in root
+/*
+
+# Except android-app directory
+!/android-app/
+
+# Except .gitignore itself
+!.gitignore
+
+# Except .github directory (for CI/CD and instructions)
+!/.github/
 
 # Android Build Files
 *.iml
