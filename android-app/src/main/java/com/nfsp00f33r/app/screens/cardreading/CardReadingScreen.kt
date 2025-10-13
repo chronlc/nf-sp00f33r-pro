@@ -31,6 +31,12 @@ import com.nfsp00f33r.app.ui.theme.CardReadingColors
 import com.nfsp00f33r.app.ui.theme.CardReadingSpacing
 import com.nfsp00f33r.app.ui.theme.CardReadingRadius
 import com.nfsp00f33r.app.ui.theme.CardReadingDimensions
+import com.nfsp00f33r.app.emv.TransactionType
+import com.nfsp00f33r.app.emv.TerminalDecision
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import java.text.NumberFormat
+import java.util.Locale
 
 /**
  * SLEEK DATA-FOCUSED EMV Card Reading Screen
@@ -316,6 +322,9 @@ private fun ControlPanelCard(viewModel: CardReadingViewModel) {
                     }
                 }
             }
+            
+            // PROXMARK3 TRANSACTION CONTROLS
+            ProxmarkTransactionControls(viewModel)
             
             // Compact Scan Button
             val scanButtonColor = when (viewModel.scanState) {

@@ -27,24 +27,25 @@ object EmvTlvParser {
     private val rocaAnalysisResults = mutableMapOf<String, RocaVulnerabilityAnalyzer.RocaAnalysisResult>()
     
     // Template tags that contain nested TLV structures
-    // Based on ChAP.py: tags marked as TEMPLATE contain nested TLV data
+    // Based on ChAP.py Python script: tags marked as TEMPLATE (type 0) contain nested TLV data
+    // These MUST be recursively parsed, not treated as flat data
     private val TEMPLATE_TAGS = setOf(
-        "6F",   // FCI Template - BINARY TEMPLATE
-        "70",   // Record Template - BINARY TEMPLATE  
-        "77",   // Response Message Template Format 2 - BINARY TEMPLATE
-        "A5",   // FCI Proprietary Template - BINARY TEMPLATE
-        "61",   // Application Template - implied TEMPLATE
-        "73",   // Directory Discretionary Template - implied TEMPLATE
-        "BF0C", // FCI Issuer Discretionary Data - BER_TLV TEMPLATE
-        "8C",   // CDOL1 - BINARY TEMPLATE (contains DOL entries)
-        "8D",   // CDOL2 - BINARY TEMPLATE (contains DOL entries)
-        "9F38"  // PDOL - BINARY TEMPLATE (contains DOL entries)
+        "6F",   // FCI Template - BINARY TEMPLATE (contains 84, A5, etc.)
+        "70",   // Record Template - BINARY TEMPLATE (contains card data tags)
+        "A5",   // FCI Proprietary Template - BINARY TEMPLATE (contains 50, 87, 5F2D, BF0C, etc.)
+        "61",   // Application Template - TEMPLATE (contains 4F, 50, 87, 73)
+        "73",   // Directory Discretionary Template - TEMPLATE
+        "BF0C"  // FCI Issuer Discretionary Data - BER_TLV TEMPLATE (contains many nested tags)
+        // NOTE: 0x77 and 0x80 have "Template" in their names but are ITEMS per ChAP.py - they contain cryptographic data, not nested TLV
+        // NOTE: CDOL1 (8C), CDOL2 (8D), PDOL (9F38) are NOT templates - they're DOL lists (different format)
     )
     
     // Tags that are ALWAYS primitive (never templates) despite having constructed bit set
     // These are EMV spec quirks where the tag encoding doesn't match the data structure
     // Based on ChAP.py reference: tags marked as ITEM are primitive, TEMPLATE are constructed
     private val ALWAYS_PRIMITIVE_TAGS = setOf(
+        "77",  // Response Message Template Format 2 - BINARY ITEM - Contains cryptographic response data, NOT nested TLV
+        "80",  // Response Message Template Format 1 - BINARY ITEM - Contains cryptographic response data, NOT nested TLV
         "82",  // Application Interchange Profile (AIP) - BINARY ITEM - 2-byte bitmask, NOT a template
         "84",  // DF Name - MIXED ITEM - Contains AID/DF Name directly, NOT nested tags
         "86",  // Issuer Script Command - BER_TLV ITEM but NOT recursive template
@@ -103,10 +104,28 @@ object EmvTlvParser {
         var maxDepth = 0
         
         try {
-            Timber.d("$TAG 🔍 Parsing $context data: ${bytesToHex(data)} (${data.size} bytes)")
+            // CRITICAL FIX: Remove status word (last 2 bytes: 9000, 6XXX, etc.) before parsing
+            // Status word is NOT TLV data and was being parsed as empty tag 90, overwriting real data
+            val dataWithoutStatus = if (data.size >= 2) {
+                val statusWord = data.copyOfRange(data.size - 2, data.size)
+                val sw1 = statusWord[0].toInt() and 0xFF
+                val sw2 = statusWord[1].toInt() and 0xFF
+                
+                // Only strip if it looks like a status word (SW1 = 90, 61, 6X, 9X)
+                if (sw1 in listOf(0x90, 0x61) || (sw1 and 0xF0) == 0x60 || (sw1 and 0xF0) == 0x90) {
+                    Timber.d("$TAG 🔧 Stripped status word: ${String.format("%02X%02X", sw1, sw2)}")
+                    data.copyOfRange(0, data.size - 2)
+                } else {
+                    data
+                }
+            } else {
+                data
+            }
+            
+            Timber.d("$TAG 🔍 Parsing $context data: ${bytesToHex(dataWithoutStatus)} (${dataWithoutStatus.size} bytes)")
             
             val result = parseTlvRecursive(
-                data, 0, data.size, tags, context, 0, 
+                dataWithoutStatus, 0, dataWithoutStatus.size, tags, context, 0, 
                 errors, warnings, validateTags
             )
             
@@ -222,17 +241,25 @@ object EmvTlvParser {
                     validCount++
                 }
                 
-                // CRITICAL: Check if this is actually a template based on data structure
-                val looksLikeTemplate = if (length > 0 && isTemplate) {
-                    // Verify if data contains valid TLV structure (peek at first byte)
-                    val nextByte = data[offset].toInt() and 0xFF
-                    // Valid tag byte: bit 8 is NOT 0 (all 0 is invalid)
-                    nextByte != 0 && (nextByte and 0xE0) != 0
+                // CRITICAL FIX: Template detection based on ChAP.py Python script logic
+                // If tag is in TEMPLATE_TAGS or has constructed bit, try to parse as template
+                val shouldParseAsTemplate = if (length > 0 && isTemplate) {
+                    // For known template tags, ALWAYS parse as template
+                    if (TEMPLATE_TAGS.contains(tagHex)) {
+                        true
+                    } else {
+                        // For tags with constructed bit (but not in known list),
+                        // verify data looks like valid TLV (peek at first bytes)
+                        val nextByte = data[offset].toInt() and 0xFF
+                        // Valid tag byte: should be in range 0x01-0xFF (not 0x00)
+                        // and should look like a tag (class bits check)
+                        nextByte != 0x00 && nextByte != 0xFF
+                    }
                 } else false
                 
-                if (looksLikeTemplate && length > 0) {
+                if (shouldParseAsTemplate && length > 0) {
                     // Parse nested template (contains other TLV tags)
-                    Timber.d("$TAG $indent🔧 $context: $tagHex ($tagDescription) - TEMPLATE [${length} bytes, contains nested tags]")
+                    Timber.d("$TAG $indent� $context: $tagHex ($tagDescription) - TEMPLATE [${length} bytes] -> parsing nested tags")
                     
                     val nestedResult = parseTlvRecursive(
                         data, offset, offset + length, tags, 
@@ -243,6 +270,10 @@ object EmvTlvParser {
                     validCount += nestedResult.first
                     invalidCount += nestedResult.second
                     maxDepth = maxOf(maxDepth, nestedResult.third)
+                    
+                    // Also store the raw template data for reference
+                    val templateValue = data.copyOfRange(offset, offset + length)
+                    tags[tagHex] = bytesToHex(templateValue)
                     
                 } else if (length > 0) {
                     // Extract primitive value (regular data tag)
@@ -356,7 +387,13 @@ object EmvTlvParser {
     
     /**
      * Determine if a tag is a template (contains nested TLV structures)
-     * CRITICAL: Some tags have constructed bit set but are actually primitive (EMV spec quirks)
+     * Based on ChAP.py Python script logic:
+     * - Tags in TEMPLATE_TAGS list are templates
+     * - Tags with constructed bit (bit 6) set MAY be templates
+     * - ALWAYS_PRIMITIVE_TAGS override the constructed bit (EMV spec quirks)
+     * 
+     * CRITICAL FIX: Removed incorrect "Core EMV" category check that was treating
+     * ALL core tags as templates
      */
     private fun isTemplateTag(tagHex: String, firstTagByte: Byte): Boolean {
         // ALWAYS check primitive list first - these override constructed bit
@@ -364,9 +401,13 @@ object EmvTlvParser {
             return false
         }
         
-        return TEMPLATE_TAGS.contains(tagHex) || 
-               isConstructedTag(firstTagByte) ||
-               EmvTagDictionary.getTagCategory(tagHex) == "Core EMV"
+        // Known template tags from ChAP.py
+        if (TEMPLATE_TAGS.contains(tagHex)) {
+            return true
+        }
+        
+        // Use constructed bit as hint (but not definitive - checked later)
+        return isConstructedTag(firstTagByte)
     }
     
     /**

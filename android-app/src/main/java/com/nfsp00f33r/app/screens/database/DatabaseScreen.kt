@@ -18,7 +18,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
 import com.nfsp00f33r.app.R
 import com.nfsp00f33r.app.data.DatabaseCard
 import com.nfsp00f33r.app.components.VirtualCardView
@@ -26,9 +28,16 @@ import com.nfsp00f33r.app.ui.components.RocaVulnerabilityBadge
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
 
 @Composable
-fun DatabaseScreen(
-    viewModel: DatabaseViewModel = viewModel()
-) {
+fun DatabaseScreen() {
+    val context = LocalContext.current
+    val viewModel: DatabaseViewModel = viewModel(
+        factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                return DatabaseViewModel(context) as T
+            }
+        }
+    )
     var showImportDialog by remember { mutableStateOf(false) }
     var showApduBreakdown by remember { mutableStateOf(false) }
     var showCardDetails by remember { mutableStateOf(false) }

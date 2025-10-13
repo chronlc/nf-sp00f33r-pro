@@ -30,10 +30,6 @@ import com.nfsp00f33r.app.cardreading.EmvTagDictionary
 import com.nfsp00f33r.app.cardreading.EnrichedTagData
 import com.nfsp00f33r.app.storage.emv.EmvSessionDatabase
 import java.util.UUID
-import com.nfsp00f33r.app.emv.TransactionType
-import com.nfsp00f33r.app.emv.TerminalDecision
-import com.nfsp00f33r.app.emv.TransactionParameterManager
-import com.nfsp00f33r.app.emv.CvmProcessor
 
 /**
  * PRODUCTION-GRADE Card Reading ViewModel
@@ -106,9 +102,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     }
     
     // Card data store with encryption (PHASE 7: Will be removed)
-    private val cardDataStore by lazy {
-        NfSp00fApplication.getCardDataStoreModule()
-    }
+    private val cardDataStore = NfSp00fApplication.getCardDataStoreModule()
     
     // PHASE 3: Room database for EMV sessions
     private val emvSessionDatabase by lazy {
@@ -123,21 +117,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private var currentSessionData: SessionScanData? = null
     private var currentSessionId: String = ""
     private var sessionStartTime: Long = 0L
-    
-    // Proxmark3-inspired transaction management
-    private val transactionParamManager = TransactionParameterManager
-    
-    var selectedTransactionType by mutableStateOf(TransactionType.QVSDC)
-        private set
-    
-    var selectedTerminalDecision by mutableStateOf(TerminalDecision.ARQC)
-        private set
-    
-    var transactionAmountCents by mutableStateOf(100L) // cents (e.g., $1.00)
-        private set
-    
-    var cvmSummary by mutableStateOf("Not checked")
-        private set
     
     // Reader types available
     enum class ReaderType {
@@ -220,25 +199,8 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     var isRocaVulnerable by mutableStateOf(false)
         private set
     
-    // Public functions for UI to change transaction parameters
-    fun setTransactionType(type: TransactionType) {
-        selectedTransactionType = type
-        Timber.d("Transaction type set to: ${type.label}")
-    }
-    
-    fun setTerminalDecision(decision: TerminalDecision) {
-        selectedTerminalDecision = decision
-        Timber.d("Terminal decision set to: ${decision.label}")
-    }
-    
-    fun updateTransactionAmount(amountCents: Long) {
-        transactionAmountCents = amountCents
-        Timber.d("Transaction amount set to: \$%.2f", amountCents / 100.0)
-    }
-    
     init {
         Timber.i("CardReadingViewModel initializing with Proxmark3 EMV workflow")
-        transactionParamManager.logConfiguration()
         
         // Defer heavy initialization to avoid blocking UI during navigation
         viewModelScope.launch {
@@ -320,14 +282,10 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      * Execute complete Proxmark3 Iceman EMV workflow
      * PPSE → AID Selection → GPO → Record Reading → Data Extraction
      */
-    /**
-     * Execute complete Proxmark3 Iceman EMV workflow - CLEAN MODULAR IMPLEMENTATION
-     * PPSE → AID Selection → GPO → Record Reading → Generate AC → GET DATA → Transaction Logs
-     */
     private suspend fun executeProxmark3EmvWorkflow(tag: android.nfc.Tag) {
         val cardId = tag.id.joinToString("") { "%02X".format(it) }
         
-        // Initialize session
+        // PHASE 3: Initialize session tracking
         currentSessionId = UUID.randomUUID().toString()
         sessionStartTime = System.currentTimeMillis()
         currentSessionData = SessionScanData(
@@ -335,539 +293,1136 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             scanStartTime = sessionStartTime,
             cardUid = cardId
         )
+        Timber.i("PHASE 3: Started EMV session $currentSessionId for card $cardId")
         
-        // Clear previous state
-        apduLog = emptyList()
-        parsedEmvFields = emptyMap()
+        // Clear previous ROCA analysis results
         EmvTlvParser.clearRocaAnalysisResults()
         rocaVulnerabilityStatus = "Analyzing..."
         isRocaVulnerable = false
         
-        Timber.i("STARTING CLEAN EMV WORKFLOW - Session $currentSessionId")
+        // Variable to store AID entries extracted from PPSE response (PHASE 1: Multi-AID)
+        var extractedAidEntries = listOf<AidEntry>()
         
-        // Connect to card
+        // Connect to card using IsoDep for real NFC communication
         val isoDep = android.nfc.tech.IsoDep.get(tag)
-        if (isoDep == null) {
-            withContext(Dispatchers.Main) {
-                statusMessage = "Card does not support ISO-DEP"
-                scanState = ScanState.ERROR
-            }
-            return
+        if (isoDep != null) {
+            isoDep.connect()
         }
-        
-        isoDep.connect()
         
         try {
-            // Phase 1: PPSE Selection
-            val aidEntries = executePhase1_PpseSelection(isoDep)
-            if (aidEntries.isEmpty()) {
-                Timber.w("No AIDs found - aborting workflow")
-                return
-            }
+            // PROXMARK3 EMV WORKFLOW - EXACT MATCH
             
-            // Phase 2: AID Selection
-            val selectedAid = executePhase2_AidSelection(isoDep, aidEntries)
-            if (selectedAid.isEmpty()) {
-                Timber.w("No AID selected successfully - aborting workflow")
-                return
-            }
-            
-            // Phase 3: GPO
-            val afl = executePhase3_Gpo(isoDep)
-            
-            // Phase 4: Read Records
-            executePhase4_ReadRecords(isoDep, afl)
-            
-            // Phase 5: Generate AC
-            executePhase5_GenerateAc(isoDep)
-            
-            // Phase 6: GET DATA
-            val logFormat = executePhase6_GetData(isoDep)
-            
-            // Phase 7: Transaction Logs
-            executePhase7_TransactionLogs(isoDep, logFormat)
-            
-            // Finalize Session
-            finalizeSession(cardId, tag)
-            
-        } catch (e: Exception) {
-            Timber.e(e, "EMV workflow error")
+            // Phase 1: SELECT PPSE - Try contactless (2PAY) or contact (1PAY) based on mode
             withContext(Dispatchers.Main) {
-                statusMessage = "Error: ${e.message}"
-                scanState = ScanState.ERROR
-            }
-            currentSessionData?.scanStatus = "ERROR"
-            currentSessionData?.errorMessage = e.message
-        } finally {
-            isoDep.close()
-        }
-    }
-    
-    /** Phase 1: PPSE Selection */
-    private suspend fun executePhase1_PpseSelection(isoDep: android.nfc.tech.IsoDep): List<AidEntry> {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 1: PPSE"
-            progress = 0.1f
-            statusMessage = "SELECT PPSE..."
-        }
-        
-        val ppseCommand = if (forceContactMode) "315041592E5359532E4444463031" else "325041592E5359532E4444463031"
-        var ppseResponse = sendPpseCommand(isoDep, ppseCommand)
-        var statusWord = ppseResponse.first
-        var responseHex = ppseResponse.second
-        
-        if (statusWord != "9000" && !forceContactMode) {
-            Timber.d("2PAY failed, trying 1PAY fallback")
-            ppseResponse = sendPpseCommand(isoDep, "315041592E5359532E4444463031")
-            statusWord = ppseResponse.first
-            responseHex = ppseResponse.second
-        }
-        
-        if (statusWord != "9000") {
-            Timber.w("PPSE selection failed: SW=$statusWord")
-            return emptyList()
-        }
-        
-        val ppseBytes = responseHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        val ppseParseResult = EmvTlvParser.parseResponse(ppseBytes, "PPSE")
-        currentSessionData?.ppseResponse = ppseParseResult.tags
-        currentSessionData?.allTags?.putAll(ppseParseResult.tags)
-        
-        val aidEntries = ppseParseResult.tags.filter { it.key == "4F" }.map { (_, enrichedTag) ->
-            val label = ppseParseResult.tags["50"]?.valueDecoded ?: "Unknown"
-            val priority = ppseParseResult.tags["87"]?.value?.toIntOrNull(16) ?: 0
-            AidEntry(enrichedTag.value, label, priority)
-        }
-        
-        Timber.i("PPSE: ${aidEntries.size} AIDs found")
-        return aidEntries
-    }
-    
-    private suspend fun sendPpseCommand(isoDep: android.nfc.tech.IsoDep, ppseHex: String): Pair<String, String> {
-        val ppseBytes = ppseHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        val command = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, ppseBytes.size.toByte()) + ppseBytes + byteArrayOf(0x00)
-        val response = isoDep.transceive(command)
-        val responseHex = response.joinToString("") { "%02X".format(it) }
-        val statusWord = if (responseHex.length >= 4) responseHex.takeLast(4) else "UNKNOWN"
-        addApduLogEntry(command.joinToString("") { "%02X".format(it) }, responseHex, statusWord, "SELECT PPSE", 0L)
-        return Pair(statusWord, responseHex)
-    }
-    
-    /** Phase 2: Multi-AID Selection */
-    private suspend fun executePhase2_AidSelection(isoDep: android.nfc.tech.IsoDep, aidEntries: List<AidEntry>): String {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 2: Multi-AID"
-            progress = 0.2f
-            statusMessage = "Analyzing applications..."
-        }
-        
-        var successfulAids = 0
-        var selectedAid = ""
-        
-        for ((aidIndex, aidEntry) in aidEntries.withIndex()) {
-            val aid = aidEntry.aid.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            val aidCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid + byteArrayOf(0x00)
-            val aidResponse = isoDep.transceive(aidCommand)
-            val aidHex = aidResponse.joinToString("") { "%02X".format(it) }
-            val statusWord = if (aidHex.length >= 4) aidHex.takeLast(4) else "UNKNOWN"
-            
-            addApduLogEntry(
-                "00A40400" + String.format("%02X", aid.size) + aidEntry.aid,
-                aidHex,
-                statusWord,
-                "SELECT AID #${aidIndex + 1}: ${aidEntry.label}",
-                0L
-            )
-            
-            if (statusWord == "9000") {
-                successfulAids++
-                val aidBytes = aidHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                val aidParseResult = EmvTlvParser.parseResponse(aidBytes, "SELECT_AID", aidEntry.label)
-                currentSessionData?.aidResponses?.add(aidParseResult.tags)
-                currentSessionData?.allTags?.putAll(aidParseResult.tags)
-                
-                if (selectedAid.isEmpty()) selectedAid = aidEntry.aid
-                Timber.i("✅ AID #${aidIndex + 1} selected: ${aidEntry.label}")
-            }
-        }
-        
-        Timber.i("Multi-AID complete: $successfulAids/${aidEntries.size} selected")
-        return selectedAid
-    }
-    
-    /** Phase 3: GPO */
-    private suspend fun executePhase3_Gpo(isoDep: android.nfc.tech.IsoDep): String {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 3: GPO"
-            progress = 0.4f
-            statusMessage = "GET PROCESSING OPTIONS..."
-        }
-        
-        val pdolData = extractPdolFromAllResponses(apduLog)
-        val gpoData = if (pdolData.isNotEmpty()) {
-            val dolEntries = EmvTlvParser.parseDol(pdolData)
-            buildPdolData(dolEntries)
-        } else {
-            byteArrayOf(0x83.toByte(), 0x00)
-        }
-        
-        val gpoCommand = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, gpoData.size.toByte()) + gpoData + byteArrayOf(0x00)
-        val gpoResponse = isoDep.transceive(gpoCommand)
-        val gpoHex = gpoResponse.joinToString("") { "%02X".format(it) }
-        val statusWord = if (gpoHex.length >= 4) gpoHex.takeLast(4) else "UNKNOWN"
-        
-        addApduLogEntry(gpoCommand.joinToString("") { "%02X".format(it) }, gpoHex, statusWord, "GET PROCESSING OPTIONS", 0L)
-        
-        var afl = ""
-        if (statusWord == "9000") {
-            val gpoBytes = gpoHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            val gpoParseResult = EmvTlvParser.parseResponse(gpoBytes, "GPO")
-            currentSessionData?.gpoResponse = gpoParseResult.tags
-            currentSessionData?.allTags?.putAll(gpoParseResult.tags)
-            
-            afl = gpoParseResult.tags["94"]?.value ?: ""
-            val aip = gpoParseResult.tags["82"]?.value ?: ""
-            
-            if (aip.isNotEmpty()) {
-                val securityInfo = analyzeAip(aip)
-                Timber.i("GPO Success: ${securityInfo.summary}")
-            }
-        }
-        
-        return afl
-    }
-    
-    /** Phase 4: Read Records */
-    private suspend fun executePhase4_ReadRecords(isoDep: android.nfc.tech.IsoDep, afl: String) {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 4: Reading Records"
-            progress = 0.6f
-            statusMessage = "Reading application data..."
-        }
-        
-        val recordsToRead = if (afl.isNotEmpty()) {
-            val aflEntries = EmvTlvParser.parseAfl(afl)
-            if (aflEntries.isNotEmpty()) {
-                aflEntries.flatMap { entry ->
-                    (entry.startRecord..entry.endRecord).map { record ->
-                        Triple(entry.sfi, record, (entry.sfi shl 3) or 0x04)
-                    }
-                }
-            } else {
-                parseAflForRecords(afl)
-            }
-        } else {
-            listOf(
-                Triple(1, 1, 0x14), Triple(1, 2, 0x14), Triple(1, 3, 0x14),
-                Triple(2, 1, 0x0C), Triple(2, 2, 0x0C),
-                Triple(3, 1, 0x1C), Triple(3, 2, 0x1C)
-            )
-        }
-        
-        for ((sfi, record, p2) in recordsToRead) {
-            val readCommand = byteArrayOf(0x00, 0xB2.toByte(), record.toByte(), p2.toByte(), 0x00)
-            val readResponse = isoDep.transceive(readCommand)
-            val readHex = readResponse.joinToString("") { "%02X".format(it) }
-            val statusWord = if (readHex.length >= 4) readHex.takeLast(4) else "UNKNOWN"
-            
-            addApduLogEntry(
-                "00B2" + String.format("%02X%02X", record, p2) + "00",
-                readHex,
-                statusWord,
-                "READ RECORD SFI $sfi Rec $record",
-                0L
-            )
-            
-            if (statusWord == "9000") {
-                val readBytes = readHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                val recordParseResult = EmvTlvParser.parseResponse(readBytes, "READ_RECORD", "SFI$sfi-REC$record")
-                currentSessionData?.recordResponses?.add(recordParseResult.tags)
-                currentSessionData?.allTags?.putAll(recordParseResult.tags)
-                
-                val detailedData = recordParseResult.tags.mapNotNull { (tag, enriched) ->
-                    enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
-                }.toMap()
-                parsedEmvFields = parsedEmvFields + detailedData
-            }
-        }
-    }
-    
-    /** Phase 5: Generate AC */
-    /**
-     * Phase 5: GENERATE AC (Application Cryptogram)
-     * Proxmark3-inspired: Uses terminal decision (AAC/TC/ARQC) + CDA support
-     * 
-     * ENHANCEMENT: P1 byte now dynamic based on selectedTerminalDecision
-     * - AAC (0x00): Transaction declined by terminal
-     * - TC (0x40): Transaction approved offline
-     * - ARQC (0x80): Online authorization required
-     * - CDA (0x10): Add CDA request flag for CDA transaction type
-     */
-    private suspend fun executePhase5_GenerateAc(isoDep: android.nfc.tech.IsoDep) {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 5: Generate AC"
-            progress = 0.75f
-            statusMessage = "Generating ${selectedTerminalDecision.label} cryptogram..."
-        }
-        
-        // Check if cryptogram already obtained in GPO response
-        val existingCryptogram = extractCryptogramFromAllResponses(apduLog)
-        if (existingCryptogram.isNotEmpty()) {
-            Timber.i("💎 Cryptogram already obtained in GPO - skipping GENERATE AC")
-            return
-        }
-        
-        // Extract CDOL1 from previous responses
-        val cdol1Data = extractCdol1FromAllResponses(apduLog)
-        val generateAcData = if (cdol1Data.length >= 4) {
-            try {
-                val cdolEntries = EmvTlvParser.parseDol(cdol1Data)
-                if (cdolEntries.isNotEmpty()) buildCdolData(cdolEntries) else byteArrayOf()
-            } catch (e: Exception) {
-                Timber.e(e, "❌ Failed to parse CDOL1")
-                byteArrayOf()
-            }
-        } else {
-            byteArrayOf()
-        }
-        
-        // Calculate P1 byte: Terminal Decision + CDA flag
-        val p1Byte = if (selectedTransactionType == TransactionType.CDA) {
-            // For CDA, add CDA request flag (0x10)
-            (selectedTerminalDecision.p1Byte.toInt() or 0x10).toByte()
-        } else {
-            selectedTerminalDecision.p1Byte
-        }
-        
-        // Build GENERATE AC command
-        val generateAcCommand = if (generateAcData.isNotEmpty()) {
-            byteArrayOf(0x80.toByte(), 0xAE.toByte(), p1Byte, 0x00.toByte(), generateAcData.size.toByte()) + 
-                generateAcData + byteArrayOf(0x00)
-        } else {
-            byteArrayOf(0x80.toByte(), 0xAE.toByte(), p1Byte, 0x00.toByte(), 0x00)
-        }
-        
-        Timber.i("📤 GENERATE AC Command: P1=${"%02X".format(p1Byte)} (${selectedTerminalDecision.label}${if (selectedTransactionType == TransactionType.CDA) " + CDA" else ""})")
-        
-        val generateAcResponse = isoDep.transceive(generateAcCommand)
-        val generateAcHex = generateAcResponse.joinToString("") { "%02X".format(it) }
-        val statusWord = if (generateAcHex.length >= 4) generateAcHex.takeLast(4) else "UNKNOWN"
-        
-        addApduLogEntry(
-            generateAcCommand.joinToString("") { "%02X".format(it) },
-            generateAcHex,
-            statusWord,
-            "GENERATE AC (${selectedTerminalDecision.label})",
-            0L
-        )
-        
-        if (statusWord == "9000") {
-            val generateAcBytes = generateAcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            val cryptogramParseResult = EmvTlvParser.parseResponse(generateAcBytes, "GENERATE_AC")
-            currentSessionData?.cryptogramResponse = cryptogramParseResult.tags
-            currentSessionData?.allTags?.putAll(cryptogramParseResult.tags)
-            
-            val cryptogram = cryptogramParseResult.tags["9F26"]?.value ?: ""
-            val cid = cryptogramParseResult.tags["9F27"]?.value ?: ""
-            
-            Timber.i("✅ GENERATE AC Success: Cryptogram=$cryptogram, CID=$cid")
-            
-            // Parse CVM list if present
-            val cvmListHex = cryptogramParseResult.tags["8E"]?.value
-            if (cvmListHex != null) {
-                val cvmBytes = cvmListHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                cvmSummary = CvmProcessor.getCvmSummary(cvmBytes)
-                Timber.d("🔐 CVM Summary: $cvmSummary")
-            }
-            
-            // If ARQC was generated and CDOL2 exists, proceed to GENERATE AC2
-            if (selectedTerminalDecision == TerminalDecision.ARQC) {
-                val cdol2Data = extractCdol2FromAllResponses(apduLog)
-                if (cdol2Data.length >= 4) {
-                    executePhase5b_GenerateAc2(isoDep, cdol2Data)
-                }
-            }
-        } else {
-            Timber.w("⚠️ GENERATE AC failed: Status $statusWord")
-        }
-    }
-    
-    /**
-     * Phase 5b: GENERATE AC2 (Second Application Cryptogram)
-     * Proxmark3-inspired: Online authorization flow with CDOL2
-     * 
-     * Called after Phase 5 if ARQC was generated and CDOL2 exists.
-     * Simulates issuer response authorizing transaction (TC) or declining (AAC).
-     * 
-     * @param cdol2Data: CDOL2 hex string from card data
-     */
-    private suspend fun executePhase5b_GenerateAc2(isoDep: android.nfc.tech.IsoDep, cdol2Data: String) {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 5b: Generate AC2"
-            progress = 0.78f
-            statusMessage = "Online authorization flow..."
-        }
-        
-        Timber.i("📡 GENERATE AC2: Processing CDOL2 for online authorization")
-        
-        try {
-            val cdol2Entries = EmvTlvParser.parseDol(cdol2Data)
-            if (cdol2Entries.isEmpty()) {
-                Timber.w("⚠️ CDOL2 parsing failed - skipping AC2")
-                return
-            }
-            
-            val generateAc2Data = buildCdolData(cdol2Entries)
-            
-            // P1 byte for AC2: Usually TC (0x40) after issuer approval
-            // In production, this would be based on actual issuer response
-            val p1ByteAc2 = TerminalDecision.TC.p1Byte
-            
-            val generateAc2Command = byteArrayOf(
-                0x80.toByte(),
-                0xAE.toByte(),
-                p1ByteAc2,
-                0x00.toByte(),
-                generateAc2Data.size.toByte()
-            ) + generateAc2Data + byteArrayOf(0x00)
-            
-            Timber.i("📤 GENERATE AC2 Command: P1=${"%02X".format(p1ByteAc2)} (TC after online auth)")
-            
-            val generateAc2Response = isoDep.transceive(generateAc2Command)
-            val generateAc2Hex = generateAc2Response.joinToString("") { "%02X".format(it) }
-            val statusWord = if (generateAc2Hex.length >= 4) generateAc2Hex.takeLast(4) else "UNKNOWN"
-            
-            addApduLogEntry(
-                generateAc2Command.joinToString("") { "%02X".format(it) },
-                generateAc2Hex,
-                statusWord,
-                "GENERATE AC2 (TC)",
-                0L
-            )
-            
-            if (statusWord == "9000") {
-                val generateAc2Bytes = generateAc2Hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                val ac2ParseResult = EmvTlvParser.parseResponse(generateAc2Bytes, "GENERATE_AC2")
-                currentSessionData?.allTags?.putAll(ac2ParseResult.tags)
-                
-                val tc = ac2ParseResult.tags["9F26"]?.value ?: ""
-                Timber.i("✅ GENERATE AC2 Success: TC=$tc (Transaction approved)")
-            } else {
-                Timber.w("⚠️ GENERATE AC2 failed: Status $statusWord")
-            }
-            
-        } catch (e: Exception) {
-            Timber.e(e, "❌ GENERATE AC2 error")
-        }
-    }
-    
-    /** Phase 6: GET DATA */
-    private suspend fun executePhase6_GetData(isoDep: android.nfc.tech.IsoDep): String {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 6: GET DATA"
-            progress = 0.85f
-            statusMessage = "Querying additional EMV data..."
-        }
-        
-        val getDataTags = listOf(
-            "9F17" to "PIN Try Counter",
-            "9F36" to "Application Transaction Counter",
-            "9F13" to "Last Online ATC Register",
-            "9F4F" to "Log Format",
-            "9F6E" to "Form Factor Indicator"
-        )
-        
-        var logFormatValue = ""
-        
-        for ((tag, description) in getDataTags) {
-            val getDataCommand = buildGetDataApdu(tag.toInt(16))
-            val getDataResponse = isoDep.transceive(getDataCommand)
-            val getDataHex = getDataResponse.joinToString("") { "%02X".format(it) }
-            val statusWord = if (getDataHex.length >= 4) getDataHex.takeLast(4) else "UNKNOWN"
-            
-            if (statusWord == "9000") {
-                addApduLogEntry(getDataCommand.joinToString("") { "%02X".format(it) }, getDataHex, statusWord, "GET DATA $tag ($description)", 0L)
-                
-                val getDataBytes = getDataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                val getDataParseResult = EmvTlvParser.parseResponse(getDataBytes, "GET_DATA", tag)
-                
-                if (currentSessionData?.getDataResponse == null) {
-                    currentSessionData?.getDataResponse = getDataParseResult.tags
+                currentPhase = "PPSE Selection"
+                progress = 0.1f
+                statusMessage = if (forceContactMode) {
+                    "Selecting PPSE (Contact Mode - 1PAY)..."
                 } else {
-                    currentSessionData?.getDataResponse = currentSessionData?.getDataResponse!! + getDataParseResult.tags
-                }
-                currentSessionData?.allTags?.putAll(getDataParseResult.tags)
-                
-                if (tag == "9F4F") {
-                    logFormatValue = getDataParseResult.tags["9F4F"]?.value ?: ""
+                    "Selecting PPSE (Auto: 2PAY→1PAY fallback)..."
                 }
             }
-        }
-        
-        return logFormatValue
-    }
-    
-    /** Phase 7: Transaction Logs */
-    private suspend fun executePhase7_TransactionLogs(isoDep: android.nfc.tech.IsoDep, logFormat: String) {
-        if (logFormat.isEmpty()) {
-            Timber.i("Transaction logs: Not supported by card")
-            return
-        }
-        
-        withContext(Dispatchers.Main) {
-            currentPhase = "Phase 7: Transaction Logs"
-            progress = 0.92f
-            statusMessage = "Reading transaction history..."
-        }
-        
-        try {
-            val logFormatBytes = logFormat.chunked(2).map { it.toInt(16) }
-            if (logFormatBytes.size >= 2) {
-                val logSfi = (logFormatBytes[0] shr 3) and 0x1F
-                val logRecordCount = logFormatBytes[1] and 0x1F
+            
+            var ppseResponse: ByteArray? = null
+            var ppseMode = ""
+            var ppseHex = ""
+            var realStatusWord = "UNKNOWN"
+            
+            if (forceContactMode) {
+                // Force contact mode: Use 1PAY.SYS.DDF01 only
+                Timber.i("🔧 FORCED CONTACT MODE: Using 1PAY.SYS.DDF01")
+                val ppse1PayCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E,
+                    0x31, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
+                ppseResponse = if (isoDep != null) isoDep.transceive(ppse1PayCommand) else null
+                ppseMode = "1PAY (Contact) [FORCED]"
                 
-                if (logSfi in 1..31 && logRecordCount in 1..30) {
-                    for (recordNum in 1..logRecordCount) {
-                        val logP2 = (logSfi shl 3) or 0x04
-                        val logReadCommand = byteArrayOf(0x00, 0xB2.toByte(), recordNum.toByte(), logP2.toByte(), 0x00)
-                        val logReadResponse = isoDep.transceive(logReadCommand)
-                        val logReadHex = logReadResponse.joinToString("") { "%02X".format(it) }
-                        val logStatusWord = if (logReadHex.length >= 4) logReadHex.takeLast(4) else "UNKNOWN"
+                if (ppseResponse != null) {
+                    ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
+                    realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
+                    addApduLogEntry(
+                        "00A404000E315041592E5359532E4444463031",
+                        ppseHex,
+                        realStatusWord,
+                        "SELECT PPSE (1PAY) [FORCED]",
+                        0L
+                    )
+                }
+            } else {
+                // Auto mode: Try 2PAY.SYS.DDF01 (contactless) first, fallback to 1PAY
+                val ppse2PayCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E, 
+                    0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
+                ppseResponse = if (isoDep != null) isoDep.transceive(ppse2PayCommand) else null
+                ppseMode = "2PAY (Contactless)"
+                
+                if (ppseResponse != null) {
+                    ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
+                    realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
+                    addApduLogEntry(
+                        "00A404000E325041592E5359532E4444463031",
+                        ppseHex,
+                        realStatusWord,
+                        "SELECT PPSE (2PAY)",
+                        0L
+                    )
+                    
+                    // If 2PAY failed, try 1PAY.SYS.DDF01 (contact)
+                    if (realStatusWord != "9000") {
+                        Timber.i("2PAY failed (SW=$realStatusWord), trying 1PAY (contact mode) as fallback")
+                        withContext(Dispatchers.Main) {
+                            statusMessage = "2PAY failed, trying 1PAY (contact)..."
+                        }
                         
-                        if (logStatusWord == "9000") {
-                            addApduLogEntry("00B2" + String.format("%02X%02X", recordNum, logP2) + "00", logReadHex, logStatusWord, "READ TRANSACTION LOG #$recordNum", 0L)
-                            
-                            val logBytes = logReadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                            val logParseResult = EmvTlvParser.parseResponse(logBytes, "TRANSACTION_LOG", "LOG$recordNum")
-                            currentSessionData?.recordResponses?.add(logParseResult.tags)
-                            currentSessionData?.allTags?.putAll(logParseResult.tags)
-                        } else if (logStatusWord == "6A83") {
-                            break
+                        val ppse1PayCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, 0x0E,
+                            0x31, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00)
+                        ppseResponse = if (isoDep != null) isoDep.transceive(ppse1PayCommand) else null
+                        ppseMode = "1PAY (Contact) [FALLBACK]"
+                        
+                        if (ppseResponse != null) {
+                            ppseHex = ppseResponse.joinToString("") { "%02X".format(it) }
+                            realStatusWord = if (ppseHex.length >= 4) ppseHex.takeLast(4) else "UNKNOWN"
+                            addApduLogEntry(
+                                "00A404000E315041592E5359532E4444463031",
+                                ppseHex,
+                                realStatusWord,
+                                "SELECT PPSE (1PAY) [FALLBACK]",
+                                0L
+                            )
                         }
                     }
                 }
             }
+            
+            if (ppseResponse != null) {
+                
+                displayParsedData("PPSE", ppseHex)
+                withContext(Dispatchers.Main) {
+                    statusMessage = "PPSE ($ppseMode): SW=$realStatusWord"
+                }
+                
+                // LIVE ANALYSIS: Check if PPSE failed, try different approach
+                if (realStatusWord != "9000") {
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "PPSE Failed ($realStatusWord) - Trying direct AID selection"
+                    }
+                    Timber.w("PPSE selection failed with SW=$realStatusWord (tried both 2PAY and 1PAY), switching strategy")
+                } else {
+                    // PHASE 3B: Parse PPSE response with unified parser
+                    val ppseBytes = ppseHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    val ppseParseResult = EmvTlvParser.parseResponse(ppseBytes, "PPSE", ppseMode)
+                    
+                    // Store parsed PPSE data in session
+                    currentSessionData?.ppseResponse = ppseParseResult.tags
+                    currentSessionData?.allTags?.putAll(ppseParseResult.tags)
+                    
+                    // Extract AIDs (tag 4F) from parsed response
+                    val aidTags = ppseParseResult.tags.filter { it.key == "4F" }
+                    val realAidEntries = aidTags.map { (_, enrichedTag) ->
+                        // Extract label (tag 50) and priority (tag 87) if available
+                        val label = ppseParseResult.tags["50"]?.valueDecoded ?: "Unknown"
+                        val priorityStr = ppseParseResult.tags["87"]?.value ?: "00"
+                        val priority = priorityStr.toIntOrNull(16) ?: 0
+                        AidEntry(
+                            aid = enrichedTag.value,
+                            label = label,
+                            priority = priority
+                        )
+                    }
+                    
+                    if (realAidEntries.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            statusMessage = "PPSE Success ($ppseMode) - Found ${realAidEntries.size} AID(s)"
+                        }
+                        Timber.i("PHASE 3B: PPSE ($ppseMode) returned ${realAidEntries.size} AIDs, ${ppseParseResult.tags.size} total tags")
+                        realAidEntries.forEachIndexed { idx, entry ->
+                            Timber.i("  #${idx + 1}: ${entry.aid} (${entry.label}, priority ${entry.priority})")
+                        }
+                        // Store real AIDs for use in AID selection phase
+                        extractedAidEntries = realAidEntries
+                    }
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    statusMessage = "PPSE: No response from card"
+                }
+                Timber.e("PPSE command failed - no response from card")
+            }
+            
+            // Phase 2: Multi-AID Selection - Process ALL AIDs (PHASE 1 COMPLETE)
+            // ChAP-inspired: Process ALL AIDs to reveal weak secondary applications
+            withContext(Dispatchers.Main) {
+                currentPhase = "Multi-AID Analysis"
+                progress = 0.2f
+                statusMessage = "Analyzing all applications..."
+            }
+            
+            // Use AIDs extracted from PPSE response (dynamic, real transaction)
+            // Fallback to common AIDs only if PPSE failed
+            val aidEntriesToTry = if (extractedAidEntries.isNotEmpty()) {
+                Timber.i("=" + "=".repeat(79))
+                Timber.i("MULTI-AID WORKFLOW: Processing ${extractedAidEntries.size} AIDs from PPSE")
+                extractedAidEntries.forEachIndexed { idx, entry ->
+                    Timber.i("  AID #${idx + 1}: ${entry.aid}")
+                    Timber.i("    Label: ${entry.label}")
+                    Timber.i("    Priority: ${entry.priority}")
+                }
+                Timber.i("="  + "=".repeat(79))
+                extractedAidEntries
+            } else {
+                Timber.w("PPSE failed - falling back to common AIDs (static)")
+                // Create AidEntry objects for fallback AIDs
+                listOf(
+                    AidEntry("A0000000041010", "MasterCard", 0),
+                    AidEntry("A0000000031010", "Visa", 0),
+                    AidEntry("A0000000250101", "Amex", 0),
+                    AidEntry("A0000001523010", "Discover", 0)
+                )
+            }
+            
+            var successfulAids = 0
+            var failedAids = 0
+            var selectedAidHex = ""
+            
+            // Process ALL AIDs (not just first) - ChAP approach
+            for ((aidIndex, aidEntry) in aidEntriesToTry.withIndex()) {
+                val aidHexString = aidEntry.aid
+                val aidLabel = aidEntry.label
+                val aidPriority = aidEntry.priority
+                
+                withContext(Dispatchers.Main) {
+                    statusMessage = "AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel"
+                }
+                
+                val aid = aidHexString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                val aidCommand = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid + byteArrayOf(0x00)
+                val aidResponse = if (isoDep != null) isoDep.transceive(aidCommand) else null
+                
+                if (aidResponse != null) {
+                    val aidHex = aidResponse.joinToString("") { "%02X".format(it) }
+                    val realStatusWord = if (aidHex.length >= 4) aidHex.takeLast(4) else "UNKNOWN"
+                    
+                    addApduLogEntry(
+                        "00A40400" + String.format("%02X", aid.size) + aidHexString,
+                        aidHex,
+                        realStatusWord,
+                        "SELECT AID #${aidIndex + 1}: $aidLabel",
+                        0L
+                    )
+                    
+                    // LIVE ANALYSIS: Check what the card actually returned
+                    when (realStatusWord) {
+                        "9000" -> {
+                            successfulAids++
+                            
+                            // PHASE 3C: Parse AID response with unified parser
+                            val aidBytes = aidHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val aidParseResult = EmvTlvParser.parseResponse(aidBytes, "SELECT_AID", aidLabel)
+                            
+                            // Store parsed AID data in session
+                            currentSessionData?.aidResponses?.add(aidParseResult.tags)
+                            currentSessionData?.allTags?.putAll(aidParseResult.tags)
+                            
+                            displayParsedData("AID_${aidIndex + 1}_$aidLabel", aidHex)
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✓ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Priority $aidPriority)"
+                            }
+                            Timber.i("PHASE 3C: AID #${aidIndex + 1} selected: $aidLabel ($aidHexString), ${aidParseResult.tags.size} tags parsed")
+                            
+                            // Store first successful AID for GPO
+                            if (selectedAidHex.isEmpty()) {
+                                selectedAidHex = aidHexString
+                            }
+                            
+                            // Continue processing ALL AIDs (don't break like Proxmark3)
+                            // This reveals weak secondary applications
+                        }
+                        "6A82" -> {
+                            failedAids++
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✗ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Not Found)"
+                            }
+                            Timber.d("✗ AID #${aidIndex + 1} not found: $aidLabel")
+                        }
+                        "6A81" -> {
+                            failedAids++
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✗ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel (Not Supported)"
+                            }
+                            Timber.d("✗ AID #${aidIndex + 1} not supported: $aidLabel")
+                        }
+                        else -> {
+                            failedAids++
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "✗ AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel ($realStatusWord)"
+                            }
+                            Timber.w("✗ AID #${aidIndex + 1} failed: $aidLabel with SW=$realStatusWord")
+                        }
+                    }
+                } else {
+                    failedAids++
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "✗ No response for AID ${aidIndex + 1}/${aidEntriesToTry.size}: $aidLabel"
+                    }
+                    Timber.e("✗ No response for AID #${aidIndex + 1}: $aidLabel")
+                }
+            }
+            
+            // Multi-AID analysis summary
+            Timber.i("="  + "=".repeat(79))
+            Timber.i("MULTI-AID ANALYSIS COMPLETE")
+            Timber.i("  Successful: $successfulAids / ${aidEntriesToTry.size}")
+            Timber.i("  Failed: $failedAids / ${aidEntriesToTry.size}")
+            Timber.i("  Selected for GPO: $selectedAidHex")
+            Timber.i("="  + "=".repeat(79))
+            
+            val aidSelected = successfulAids > 0
+            
+            if (!aidSelected) {
+                withContext(Dispatchers.Main) {
+                    statusMessage = "CRITICAL: No valid AID found - All ${aidEntriesToTry.size} AIDs failed"
+                    currentPhase = "Error"
+                    progress = 0.0f
+                }
+                Timber.e("No AID selection succeeded - aborting EMV workflow")
+                return // Don't continue if no AID selected
+            }
+            
+            withContext(Dispatchers.Main) {
+                statusMessage = "Multi-AID complete: $successfulAids/${aidEntriesToTry.size} selected"
+            }
+            
+            // TODO PHASE 3: Add AIP security analysis here to compare all successful AIDs
+            
+            // Phase 3: GET PROCESSING OPTIONS with dynamic PDOL data
+            withContext(Dispatchers.Main) {
+                currentPhase = "GPO"
+                progress = 0.4f
+                statusMessage = "GET PROCESSING OPTIONS..."
+            }
+            
+            // Extract PDOL from AID selection response
+            val pdolData = extractPdolFromAllResponses(apduLog)
+            Timber.i("=== PDOL EXTRACTION ===")
+            Timber.i("PDOL raw data: $pdolData")
+            
+            val gpoData = if (pdolData.isNotEmpty()) {
+                // Parse PDOL and build dynamic data
+                val dolEntries = EmvTlvParser.parseDol(pdolData)
+                Timber.i("PDOL parsed ${dolEntries.size} entries:")
+                dolEntries.forEach { entry ->
+                    Timber.i("  Tag ${entry.tag} (${entry.tagName}): expects ${entry.length} bytes")
+                }
+                buildPdolData(dolEntries)
+            } else {
+                // No PDOL - use empty data
+                Timber.w("No PDOL found - using empty data")
+                byteArrayOf(0x83.toByte(), 0x00)
+            }
+            
+            Timber.i("GPO data to send: ${gpoData.joinToString("") { "%02X".format(it) }} (${gpoData.size} bytes)")
+            val gpoCommand = byteArrayOf(0x80.toByte(), 0xA8.toByte(), 0x00, 0x00, gpoData.size.toByte()) + gpoData + byteArrayOf(0x00)
+            Timber.i("Full GPO command: ${gpoCommand.joinToString("") { "%02X".format(it) }}")
+            val gpoResponse = if (isoDep != null) isoDep.transceive(gpoCommand) else null
+            
+            if (gpoResponse != null) {
+                val gpoHex = gpoResponse.joinToString("") { "%02X".format(it) }
+                val realStatusWord = if (gpoHex.length >= 4) gpoHex.takeLast(4) else "UNKNOWN"
+                val gpoCommandHex = gpoCommand.joinToString("") { "%02X".format(it) }
+                addApduLogEntry(
+                    gpoCommandHex,
+                    gpoHex,
+                    realStatusWord,
+                    "GET PROCESSING OPTIONS",
+                    0L
+                )
+                displayParsedData("GPO", gpoHex)
+                
+                // PHASE 3C: Parse GPO response with unified parser
+                when (realStatusWord) {
+                    "9000" -> {
+                        val gpoBytes = gpoHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        val gpoParseResult = EmvTlvParser.parseResponse(gpoBytes, "GPO")
+                        
+                        // Store parsed GPO data in session
+                        currentSessionData?.gpoResponse = gpoParseResult.tags
+                        currentSessionData?.allTags?.putAll(gpoParseResult.tags)
+                        
+                        // Extract key fields from parsed tags
+                        val extractedPan = gpoParseResult.tags["5A"]?.value ?: ""
+                        val aip = gpoParseResult.tags["82"]?.value ?: ""
+                        val afl = gpoParseResult.tags["94"]?.value ?: ""
+                        
+                        Timber.i("PHASE 3C: GPO parsed ${gpoParseResult.tags.size} tags, PAN=${if (extractedPan.isNotEmpty()) "present" else "none"}, AIP=${aip}, AFL=${if (afl.isNotEmpty()) "${afl.length/2} bytes" else "none"}")
+                        
+                        // Parse AIP for security analysis
+                        if (aip.isNotEmpty()) {
+                            val aipCapabilities = EmvTlvParser.parseAip(aip)
+                            aipCapabilities?.let { cap ->
+                                val authMethods = mutableListOf<String>()
+                                if (cap.sdaSupported) authMethods.add("SDA")
+                                if (cap.ddaSupported) authMethods.add("DDA")
+                                if (cap.cdaSupported) authMethods.add("CDA")
+                                
+                                Timber.i("AIP Analysis: Auth=${authMethods.joinToString("/")}, CVM=${cap.cardholderVerificationSupported}, MSD=${cap.msdSupported}")
+                                
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO: ${authMethods.joinToString("/")} ${if (cap.cardholderVerificationSupported) "+CVM" else ""}"
+                                }
+                            }
+                            
+                            // Enhanced security analysis
+                            val securityInfo = analyzeAip(aip)
+                            if (securityInfo.isWeak) {
+                                Timber.w("SECURITY ALERT: ${securityInfo.summary}")
+                                withContext(Dispatchers.Main) {
+                                    statusMessage += " [${securityInfo.summary}]"
+                                }
+                            } else {
+                                Timber.i("${securityInfo.summary}")
+                            }
+                        }
+                        
+                        when {
+                            extractedPan.isNotEmpty() -> {
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO Success: PAN=${extractedPan.take(6)}****${extractedPan.takeLast(4)}"
+                                    if (aip.isNotEmpty()) statusMessage += " AIP=$aip"
+                                }
+                                Timber.i("GPO successful - PAN extracted: ${extractedPan.take(6)}****${extractedPan.takeLast(4)}")
+                            }
+                            aip.isNotEmpty() || afl.isNotEmpty() -> {
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO Success: AIP=$aip AFL=$afl"
+                                }
+                                Timber.i("GPO successful - AIP/AFL extracted")
+                            }
+                            else -> {
+                                withContext(Dispatchers.Main) {
+                                    statusMessage = "GPO Success but no EMV data found"
+                                }
+                                Timber.w("GPO succeeded but no parseable EMV data in response")
+                            }
+                        }
+                        
+                        // Check for cryptogram in GPO response (Visa Quick VSDC)
+                        val cryptogram = gpoParseResult.tags["9F26"]?.value ?: ""
+                        val cid = gpoParseResult.tags["9F27"]?.value ?: ""
+                        val atc = gpoParseResult.tags["9F36"]?.value ?: ""
+                        
+                        if (cryptogram.isNotEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                statusMessage += " | Cryptogram: ${cryptogram.take(8)}..."
+                            }
+                            Timber.i("GPO returned cryptogram directly (Visa Quick VSDC): AC=$cryptogram, CID=$cid, ATC=$atc")
+                        }
+                        
+                        // Parse AFL for dynamic record reading
+                        if (afl.isNotEmpty()) {
+                            val aflEntries = EmvTlvParser.parseAfl(afl)
+                            if (aflEntries.isNotEmpty()) {
+                                withContext(Dispatchers.Main) {
+                                    statusMessage += " - ${aflEntries.size} AFL entries, ${aflEntries.sumOf { it.endRecord - it.startRecord + 1 }} records"
+                                }
+                                Timber.i("AFL parsed: ${aflEntries.size} entries")
+                            }
+                        }
+                    }
+                    "6985" -> {
+                        statusMessage = "GPO Failed: Conditions not satisfied"
+                        Timber.w("GPO failed - conditions not satisfied (card may require different PDOL)")
+                    }
+                    "6A88" -> {
+                        statusMessage = "GPO Failed: Referenced data not found"
+                        Timber.w("GPO failed - referenced data not found")
+                    }
+                    else -> {
+                        statusMessage = "GPO Failed: SW=$realStatusWord"
+                        Timber.w("GPO failed with SW=$realStatusWord")
+                    }
+                }
+            } else {
+                statusMessage = "GPO: No response from card"
+                Timber.e("GPO command failed - no response")
+            }
+            
+            // Phase 4: READ APPLICATION DATA using AFL-based intelligent reading
+            withContext(Dispatchers.Main) {
+                currentPhase = "Reading Records"
+                progress = 0.6f
+                statusMessage = "Reading application data..."
+            }
+            
+            // Use EmvTlvParser to parse AFL for intelligent record reading
+            val aflFromGpo = extractAflFromAllResponses(apduLog)
+            Timber.i("=".repeat(80))
+            Timber.i("AFL PARSING AND RECORD READING")
+            Timber.i("AFL extracted from responses: ${if (aflFromGpo.isNotEmpty()) aflFromGpo else "NONE"}")
+            val recordsToRead = if (aflFromGpo.isNotEmpty()) {
+                val aflEntries = EmvTlvParser.parseAfl(aflFromGpo)
+                if (aflEntries.isNotEmpty()) {
+                    Timber.i("✓ AFL parsed successfully: ${aflEntries.size} entries")
+                    aflEntries.forEach { entry ->
+                        Timber.i("  SFI ${entry.sfi}: Records ${entry.startRecord}-${entry.endRecord}, Offline=${entry.offlineRecords}")
+                    }
+                    val records = aflEntries.flatMap { entry ->
+                        (entry.startRecord..entry.endRecord).map { record ->
+                            Triple(entry.sfi, record, (entry.sfi shl 3) or 0x04)
+                        }
+                    }
+                    Timber.i("Will read ${records.size} total records")
+                    records
+                } else {
+                    Timber.w("✗ AFL parsing failed - using fallback")
+                    // Fallback to parseAflForRecords if EmvTlvParser fails
+                    parseAflForRecords(aflFromGpo)
+                }
+            } else {
+                Timber.w("✗ No AFL found - using fallback record locations")
+                // Fallback to common record locations if no AFL
+                listOf(
+                    Triple(1, 1, 0x14), Triple(1, 2, 0x14), Triple(1, 3, 0x14),
+                    Triple(2, 1, 0x0C), Triple(2, 2, 0x0C),
+                    Triple(3, 1, 0x1C), Triple(3, 2, 0x1C)
+                )
+            }
+            Timber.i("=".repeat(80))
+            
+            var recordsRead = 0
+            var panFound = false
+            
+            for ((sfi, record, p2) in recordsToRead) {
+                val readCommand = byteArrayOf(0x00, 0xB2.toByte(), record.toByte(), p2.toByte(), 0x00)
+                val readResponse = if (isoDep != null) isoDep.transceive(readCommand) else null
+                
+                if (readResponse != null) {
+                    val readHex = readResponse.joinToString("") { "%02X".format(it) }
+                    val realStatusWord = if (readHex.length >= 4) readHex.takeLast(4) else "UNKNOWN"
+                    addApduLogEntry(
+                        "00B2" + String.format("%02X%02X", record, p2) + "00",
+                        readHex,
+                        realStatusWord,
+                        "READ RECORD SFI $sfi Rec $record",
+                        0L
+                    )
+                    
+                    // PHASE 3C: Parse record response with unified parser
+                    when (realStatusWord) {
+                        "9000" -> {
+                            recordsRead++
+                            
+                            val readBytes = readHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val recordParseResult = EmvTlvParser.parseResponse(readBytes, "READ_RECORD", "SFI$sfi-REC$record")
+                            
+                            // Store parsed record data in session
+                            currentSessionData?.recordResponses?.add(recordParseResult.tags)
+                            currentSessionData?.allTags?.putAll(recordParseResult.tags)
+                            
+                            displayParsedData("SFI${sfi}_REC$record", readHex)
+                            
+                            // Extract key fields from parsed tags
+                            val recordPan = recordParseResult.tags["5A"]?.value ?: ""
+                            val track2 = recordParseResult.tags["57"]?.value ?: ""
+                            val expiry = recordParseResult.tags["5F24"]?.valueDecoded ?: "N/A"
+                            val cardholderName = recordParseResult.tags["5F20"]?.valueDecoded ?: "N/A"
+                            
+                            // Build detailed data map for UI
+                            val detailedData = recordParseResult.tags.mapNotNull { (tag, enriched) ->
+                                enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                            }.toMap()
+                            
+                            // UPDATE UI STATE: Merge new data with existing parsed fields
+                            parsedEmvFields = parsedEmvFields + detailedData
+                            
+                            Timber.i("PHASE 3C: SFI $sfi Record $record parsed ${recordParseResult.tags.size} tags")
+                            
+                            when {
+                                recordPan.isNotEmpty() -> {
+                                    statusMessage = "SFI $sfi Rec $record: PAN=${recordPan} EXP=$expiry NAME=$cardholderName"
+                                    panFound = true
+                                    Timber.i("Found PAN in SFI $sfi Record $record")
+                                }
+                                track2.isNotEmpty() -> {
+                                    val track2Pan = track2.substringBefore("D")
+                                    val track2Expiry = track2.substringAfter("D").take(4)
+                                    statusMessage = "SFI $sfi Rec $record: Track2 PAN=${track2Pan} EXP=$track2Expiry"
+                                    Timber.i("Found Track2 in SFI $sfi Record $record")
+                                }
+                                else -> {
+                                    val importantTags = recordParseResult.tags.filter { (tag, _) -> 
+                                        tag in listOf("5A", "57", "5F20", "5F24", "5F25", "5F28", "5F2A", "82", "84", "87", "94", "9F07", "9F08", "9F0D", "9F0E", "9F0F")
+                                    }
+                                    statusMessage = "SFI $sfi Rec $record: ${recordParseResult.tags.size} tags (${importantTags.size} important)"
+                                    if (importantTags.isNotEmpty()) {
+                                        Timber.i("SFI $sfi Record $record important tags: ${importantTags.keys.joinToString(",")}")
+                                    }
+                                }
+                            }
+                        }
+                        "6A83" -> {
+                            statusMessage = "SFI $sfi Rec $record: Record not found"
+                            Timber.d("SFI $sfi Record $record not found")
+                        }
+                        "6A82" -> {
+                            statusMessage = "SFI $sfi Rec $record: File not found"
+                            Timber.d("SFI $sfi Record $record file not found")
+                        }
+                        else -> {
+                            statusMessage = "SFI $sfi Rec $record: Failed ($realStatusWord)"
+                            Timber.w("SFI $sfi Record $record failed with SW=$realStatusWord")
+                        }
+                    }
+                } else {
+                    statusMessage = "SFI $sfi Rec $record: No response"
+                    Timber.e("No response for SFI $sfi Record $record")
+                }
+            }
+            
+            withContext(Dispatchers.Main) {
+                statusMessage = "Records complete: $recordsRead read, PAN ${if (panFound) "found" else "not found"}"
+            }
+            
+            // Phase 4B: Extended Record Scan - Search for critical missing tags
+            withContext(Dispatchers.Main) {
+                currentPhase = "Extended Record Scan"
+                progress = 0.7f
+                statusMessage = "Searching for critical EMV tags..."
+            }
+            
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 4B: EXTENDED RECORD SCAN FOR CRITICAL TAGS")
+            
+            // Define critical tags needed for 100% attack coverage
+            val criticalTags = listOf(
+                "8E" to "CVM List (CVM Bypass + Offline Approval)",
+                "8C" to "CDOL1 (Amount Modification + GENERATE AC)",
+                "8D" to "CDOL2 (Enhanced GENERATE AC)",
+                "8F" to "CA Public Key Index (ROCA Analysis)",
+                "9F32" to "Issuer Public Key Exponent (ROCA)",
+                "9F47" to "ICC Public Key Exponent (ROCA)",
+                "93" to "Signed Static Data (SDA/DDA Verification)"
+            )
+            
+            // Check which critical tags are missing
+            val allTagsFound = currentSessionData?.allTags ?: emptyMap()
+            val missingTags = criticalTags.filter { (tag, _) -> !allTagsFound.containsKey(tag) }
+            
+            if (missingTags.isNotEmpty()) {
+                Timber.i("Missing ${missingTags.size} critical tags:")
+                missingTags.forEach { (tag, description) ->
+                    Timber.i("  ❌ $tag - $description")
+                }
+                Timber.i("Initiating extended scan of SFI 1-3, Records 1-16...")
+                
+                var additionalRecordsRead = 0
+                var criticalTagsFound = 0
+                val aflReadSet = recordsToRead.map { it.first to it.second }.toSet()
+                
+                // Scan SFI 1-3, Records 1-16 (common EMV range)
+                for (sfi in 1..3) {
+                    for (record in 1..16) {
+                        // Skip if already read from AFL
+                        if (aflReadSet.contains(sfi to record)) {
+                            continue
+                        }
+                        
+                        val p2 = (sfi shl 3) or 0x04  // SFI in upper 5 bits, P2 reference: short EF identifier
+                        val readCommand = byteArrayOf(0x00, 0xB2.toByte(), record.toByte(), p2.toByte(), 0x00)
+                        val readResponse = if (isoDep != null) isoDep.transceive(readCommand) else null
+                        
+                        if (readResponse != null) {
+                            val readHex = readResponse.joinToString("") { "%02X".format(it) }
+                            val realStatusWord = if (readHex.length >= 4) readHex.takeLast(4) else "UNKNOWN"
+                            
+                            when (realStatusWord) {
+                                "9000" -> {
+                                    additionalRecordsRead++
+                                    
+                                    // Parse with unified parser
+                                    val readBytes = readHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                                    val extendedParseResult = EmvTlvParser.parseResponse(readBytes, "EXTENDED_SCAN", "SFI$sfi-REC$record")
+                                    
+                                    // Check if we found any missing critical tags
+                                    val foundCritical = extendedParseResult.tags.keys.filter { tag ->
+                                        missingTags.any { (criticalTag, _) -> criticalTag == tag }
+                                    }
+                                    
+                                    if (foundCritical.isNotEmpty()) {
+                                        criticalTagsFound += foundCritical.size
+                                        Timber.i("✅ SFI $sfi Record $record: Found ${foundCritical.size} CRITICAL tags: ${foundCritical.joinToString(", ")}")
+                                        
+                                        foundCritical.forEach { tag ->
+                                            val description = criticalTags.find { it.first == tag }?.second ?: "Unknown"
+                                            val tagData = extendedParseResult.tags[tag]
+                                            Timber.i("   ✓ $tag ($description): ${tagData?.value?.take(32) ?: ""}...")
+                                        }
+                                        
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", record, p2) + "00",
+                                            readHex,
+                                            realStatusWord,
+                                            "READ RECORD SFI $sfi Rec $record (extended scan - ${foundCritical.size} critical tags)",
+                                            0L
+                                        )
+                                    } else {
+                                        // Found record but no critical tags - log quietly
+                                        Timber.d("SFI $sfi Record $record: ${extendedParseResult.tags.size} tags (no critical)")
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", record, p2) + "00",
+                                            readHex,
+                                            realStatusWord,
+                                            "READ RECORD SFI $sfi Rec $record (extended scan)",
+                                            0L
+                                        )
+                                    }
+                                    
+                                    // Store all parsed data
+                                    currentSessionData?.recordResponses?.add(extendedParseResult.tags)
+                                    currentSessionData?.allTags?.putAll(extendedParseResult.tags)
+                                    
+                                    // Update UI with detailed data
+                                    val detailedData = extendedParseResult.tags.mapNotNull { (tag, enriched) ->
+                                        enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                                    }.toMap()
+                                    parsedEmvFields = parsedEmvFields + detailedData
+                                }
+                                "6A83" -> {
+                                    // Record not found - expected, don't log
+                                }
+                                "6A82" -> {
+                                    // File not found - SFI doesn't exist, stop scanning this SFI
+                                    Timber.d("SFI $sfi not found, skipping remaining records")
+                                    break
+                                }
+                                else -> {
+                                    // Other error - continue
+                                    Timber.d("SFI $sfi Record $record: SW=$realStatusWord")
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Final summary of extended scan
+                val stillMissing = criticalTags.filter { (tag, _) -> 
+                    !(currentSessionData?.allTags?.containsKey(tag) ?: false)
+                }
+                
+                Timber.i("=".repeat(80))
+                Timber.i("EXTENDED SCAN COMPLETE:")
+                Timber.i("  Additional records read: $additionalRecordsRead")
+                Timber.i("  Critical tags found: $criticalTagsFound / ${missingTags.size}")
+                if (stillMissing.isEmpty()) {
+                    Timber.i("  ✅ ALL CRITICAL TAGS FOUND - 100% ATTACK COVERAGE")
+                } else {
+                    Timber.i("  ⚠️  Still missing ${stillMissing.size} tags:")
+                    stillMissing.forEach { (tag, description) ->
+                        Timber.i("     ❌ $tag - $description")
+                    }
+                }
+                Timber.i("=".repeat(80))
+                
+                withContext(Dispatchers.Main) {
+                    if (stillMissing.isEmpty()) {
+                        statusMessage = "Extended scan: ${criticalTagsFound}/${missingTags.size} critical tags found ✅"
+                    } else {
+                        statusMessage = "Extended scan: ${criticalTagsFound}/${missingTags.size} critical tags found (${stillMissing.size} missing)"
+                    }
+                }
+            } else {
+                Timber.i("✅ All critical tags already found in AFL records - skipping extended scan")
+                withContext(Dispatchers.Main) {
+                    statusMessage = "All critical tags found - 100% coverage ✅"
+                }
+            }
+            
+            // Phase 5: GENERATE AC (Application Cryptogram) - Skip if already obtained in GPO
+            val existingCryptogram = extractCryptogramFromAllResponses(apduLog)
+            
+            if (existingCryptogram.isNotEmpty()) {
+                Timber.i("Cryptogram already obtained in GPO response (Visa Quick VSDC) - skipping GENERATE AC")
+                withContext(Dispatchers.Main) {
+                    currentPhase = "Cryptogram (from GPO)"
+                    progress = 0.75f
+                    statusMessage = "Cryptogram already obtained: ${existingCryptogram.take(16)}..."
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    currentPhase = "GENERATE AC"
+                    progress = 0.75f
+                    statusMessage = "Generating cryptogram..."
+                }
+            }
+            
+            // Extract CDOL1 from records for GENERATE AC data building
+            val cdol1Data = extractCdol1FromAllResponses(apduLog)
+            android.util.Log.e("DEBUG_CDOL", "=== CDOL1 EXTRACTION DEBUG ===")
+            android.util.Log.e("DEBUG_CDOL", "Extracted CDOL1 data: '$cdol1Data'")
+            android.util.Log.e("DEBUG_CDOL", "CDOL1 length: ${cdol1Data.length} chars = ${cdol1Data.length / 2} bytes")
+            
+            // CDOL1 must be at least 4 hex chars (2 bytes): 1-byte tag + 1-byte length minimum
+            // Example valid CDOL1: "9F3704" (tag 9F37, length 4 bytes)
+            // Invalid: "F6" (only 1 byte, not a valid tag-length pair)
+            val isValidCdol = cdol1Data.length >= 4
+            android.util.Log.e("DEBUG_CDOL", "Validation: isEmpty=${cdol1Data.isEmpty()}, length>= 4=$isValidCdol")
+            Timber.d("Extracted CDOL1 data: $cdol1Data (${cdol1Data.length / 2} bytes)")
+            
+            val generateAcData = if (isValidCdol) {
+                // Parse CDOL1 and build dynamic data
+                // CDOL must be at least 2 bytes (1 tag + 1 length minimum)
+                try {
+                    android.util.Log.e("DEBUG_CDOL", "Attempting to parse CDOL1 as DOL...")
+                    val cdolEntries = EmvTlvParser.parseDol(cdol1Data)
+                    android.util.Log.e("DEBUG_CDOL", "Parsed ${cdolEntries.size} CDOL entries")
+                    cdolEntries.forEachIndexed { idx, entry ->
+                        android.util.Log.e("DEBUG_CDOL", "  Entry $idx: tag=${entry.tag}, length=${entry.length}")
+                    }
+                    if (cdolEntries.isNotEmpty()) {
+                        Timber.i("CDOL1 contains ${cdolEntries.size} entries: ${cdolEntries.joinToString { "${it.tag}(${it.length})" }}")
+                        val builtData = buildCdolData(cdolEntries)
+                        android.util.Log.e("DEBUG_CDOL", "Built CDOL data: ${builtData.size} bytes")
+                        builtData
+                    } else {
+                        android.util.Log.e("DEBUG_CDOL", "No entries parsed - using minimal GENERATE AC")
+                        Timber.w("CDOL1 parsed but no entries - using minimal GENERATE AC")
+                        byteArrayOf()
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("DEBUG_CDOL", "EXCEPTION parsing CDOL1: ${e.message}")
+                    e.printStackTrace()
+                    Timber.e(e, "Failed to parse CDOL1: $cdol1Data")
+                    byteArrayOf()
+                }
+            } else {
+                // No CDOL1 or invalid CDOL1 - use minimal data
+                Timber.w("No valid CDOL1 found (data=$cdol1Data) - using minimal GENERATE AC data")
+                byteArrayOf()
+            }
+            
+            // GENERATE AC command: 80 AE [RefControl] 00 [Lc] [Data] [Le]
+            // RefControl: 80 = ARQC (online auth request), 40 = TC (transaction certificate), 00 = AAC (declined)
+            val generateAcCommand = if (generateAcData.isNotEmpty()) {
+                byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), generateAcData.size.toByte()) + generateAcData + byteArrayOf(0x00)
+            } else {
+                // Minimal GENERATE AC for ARQC (no data, no Le)
+                // ISO 7816-4: When Lc=0 (no command data), Le should be omitted (Case 1 command)
+                byteArrayOf(0x80.toByte(), 0xAE.toByte(), 0x80.toByte(), 0x00.toByte(), 0x00)
+            }
+            
+            val generateAcResponse = if (isoDep != null) isoDep.transceive(generateAcCommand) else null
+            
+            if (generateAcResponse != null) {
+                val generateAcHex = generateAcResponse.joinToString("") { "%02X".format(it) }
+                val realStatusWord = if (generateAcHex.length >= 4) generateAcHex.takeLast(4) else "UNKNOWN"
+                val generateAcCommandHex = generateAcCommand.joinToString("") { "%02X".format(it) }
+                addApduLogEntry(
+                    generateAcCommandHex,
+                    generateAcHex,
+                    realStatusWord,
+                    "GENERATE AC (ARQC)",
+                    0L
+                )
+                
+                when (realStatusWord) {
+                    "9000" -> {
+                        // PHASE 3D: Parse GENERATE AC response with unified parser
+                        val generateAcBytes = generateAcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        val cryptogramParseResult = EmvTlvParser.parseResponse(generateAcBytes, "GENERATE_AC")
+                        
+                        // Store parsed cryptogram data in session
+                        currentSessionData?.cryptogramResponse = cryptogramParseResult.tags
+                        currentSessionData?.allTags?.putAll(cryptogramParseResult.tags)
+                        
+                        displayParsedData("GENERATE_AC", generateAcHex)
+                        
+                        // Extract cryptogram data from parsed tags
+                        val arqc = cryptogramParseResult.tags["9F26"]?.value ?: ""
+                        val cid = cryptogramParseResult.tags["9F27"]?.value ?: ""
+                        val atc = cryptogramParseResult.tags["9F36"]?.value ?: ""
+                        
+                        withContext(Dispatchers.Main) {
+                            statusMessage = "GENERATE AC Success: ARQC=$arqc CID=$cid ATC=$atc"
+                        }
+                        Timber.i("PHASE 3D: GENERATE AC parsed ${cryptogramParseResult.tags.size} tags - ARQC: $arqc, CID: $cid, ATC: $atc")
+                    }
+                    "6985" -> {
+                        statusMessage = "GENERATE AC Failed: Conditions not satisfied"
+                        Timber.w("GENERATE AC failed - conditions not satisfied")
+                    }
+                    "6A88" -> {
+                        statusMessage = "GENERATE AC Failed: Referenced data not found"
+                        Timber.w("GENERATE AC failed - referenced data not found")
+                    }
+                    else -> {
+                        statusMessage = "GENERATE AC Failed: SW=$realStatusWord"
+                        Timber.w("GENERATE AC failed with SW=$realStatusWord")
+                    }
+                }
+            } else {
+                statusMessage = "GENERATE AC: No response from card"
+                Timber.e("GENERATE AC command failed - no response")
+            }
+            
+            // PHASE 6: GET DATA for specific EMV tags (Proxmark3-style primitives)
+            withContext(Dispatchers.Main) {
+                currentPhase = "Phase 6: GET DATA PRIMITIVES"
+                progress = 0.85f
+                statusMessage = "Querying additional EMV data..."
+            }
+            
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 6: GET DATA PRIMITIVES (ALWAYS EXECUTE)")
+            Timber.i("Note: Running GET DATA even if cryptogram obtained in GPO for maximum data collection")
+            
+            // Comprehensive GET DATA tag list for 100% attack coverage
+            val getDataTags = listOf(
+                "9F17" to "PIN Try Counter",
+                "9F36" to "Application Transaction Counter (ATC)",
+                "9F13" to "Last Online ATC Register",
+                "9F4F" to "Log Format",
+                "9F4D" to "Log Entry",
+                "9F6E" to "Form Factor Indicator",
+                "9F6D" to "Mag-stripe Track1 Data",
+                "DF60" to "Proprietary Data 60",
+                "DF61" to "Proprietary Data 61",
+                "DF62" to "Proprietary Data 62",
+                "DF63" to "Proprietary Data 63",
+                "DF64" to "Proprietary Data 64"
+            )
+            
+            var getDataSuccessCount = 0
+            var logFormatFound = false
+            var logFormatValue = ""
+            
+            for ((tag, description) in getDataTags) {
+                val getDataCommand = buildGetDataApdu(tag.toInt(16))
+                val getDataResponse = if (isoDep != null) isoDep.transceive(getDataCommand) else null
+                
+                if (getDataResponse != null) {
+                    val getDataHex = getDataResponse.joinToString("") { "%02X".format(it) }
+                    val realStatusWord = if (getDataHex.length >= 4) getDataHex.takeLast(4) else "UNKNOWN"
+                    
+                    when (realStatusWord) {
+                        "9000" -> {
+                            getDataSuccessCount++
+                            
+                            addApduLogEntry(
+                                getDataCommand.joinToString("") { "%02X".format(it) },
+                                getDataHex,
+                                realStatusWord,
+                                "GET DATA $tag ($description)",
+                                0L
+                            )
+                            
+                            // Parse with unified parser
+                            val getDataBytes = getDataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val getDataParseResult = EmvTlvParser.parseResponse(getDataBytes, "GET_DATA", tag)
+                            
+                            // Store in session
+                            if (currentSessionData?.getDataResponse == null) {
+                                currentSessionData?.getDataResponse = getDataParseResult.tags
+                            } else {
+                                currentSessionData?.getDataResponse = currentSessionData?.getDataResponse!! + getDataParseResult.tags
+                            }
+                            currentSessionData?.allTags?.putAll(getDataParseResult.tags)
+                            
+                            // Update UI with parsed data
+                            val detailedData = getDataParseResult.tags.mapNotNull { (tagKey, enriched) ->
+                                enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                            }.toMap()
+                            parsedEmvFields = parsedEmvFields + detailedData
+                            
+                            // Check if this is Log Format (enables transaction log reading)
+                            if (tag == "9F4F" && getDataParseResult.tags.containsKey("9F4F")) {
+                                logFormatFound = true
+                                logFormatValue = getDataParseResult.tags["9F4F"]?.value ?: ""
+                                Timber.i("✅ $description ($tag): $logFormatValue - TRANSACTION LOGS ENABLED")
+                            } else {
+                                val tagData = getDataParseResult.tags[tag]?.value ?: getDataHex.substring(0, minOf(getDataHex.length, 32))
+                                Timber.i("✅ $description ($tag): ${tagData.take(32)}${if (tagData.length > 32) "..." else ""}")
+                            }
+                        }
+                        "6A88" -> {
+                            // Referenced data not found - normal for many tags
+                            Timber.d("   $description ($tag): Not supported by card")
+                        }
+                        "6A81" -> {
+                            // Function not supported
+                            Timber.d("   $description ($tag): Function not supported")
+                        }
+                        else -> {
+                            // Other error
+                            Timber.d("   $description ($tag): SW=$realStatusWord")
+                            addApduLogEntry(
+                                getDataCommand.joinToString("") { "%02X".format(it) },
+                                getDataHex,
+                                realStatusWord,
+                                "GET DATA $tag ($description) - FAILED",
+                                0L
+                            )
+                        }
+                    }
+                } else {
+                    Timber.e("✗ $description ($tag): No response from card")
+                }
+            }
+            
+            Timber.i("=".repeat(80))
+            Timber.i("PHASE 6 COMPLETE: $getDataSuccessCount / ${getDataTags.size} GET DATA tags retrieved")
+            Timber.i("=".repeat(80))
+            
+            withContext(Dispatchers.Main) {
+                statusMessage = "GET DATA complete: $getDataSuccessCount / ${getDataTags.size} tags"
+            }
+            
+            // PHASE 7: Transaction Log Reading (if Log Format found)
+            if (logFormatFound && logFormatValue.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    currentPhase = "Phase 7: TRANSACTION LOGS"
+                    progress = 0.92f
+                    statusMessage = "Reading transaction history..."
+                }
+                
+                Timber.i("=".repeat(80))
+                Timber.i("PHASE 7: TRANSACTION LOG READING")
+                Timber.i("Log Format (9F4F) found: $logFormatValue")
+                
+                try {
+                    // Parse Log Format: typically 2 bytes
+                    // Byte 0: SFI (upper 5 bits) + record reference
+                    // Byte 1: Number of log records
+                    val logFormatBytes = logFormatValue.chunked(2).map { it.toInt(16) }
+                    
+                    if (logFormatBytes.size >= 2) {
+                        val byte0 = logFormatBytes[0]
+                        val byte1 = logFormatBytes[1]
+                        
+                        val logSfi = (byte0 shr 3) and 0x1F  // Upper 5 bits
+                        val logRecordCount = byte1 and 0x1F  // Lower 5 bits typically
+                        
+                        Timber.i("Parsed Log Format: SFI=$logSfi, Record Count=$logRecordCount")
+                        
+                        if (logSfi in 1..31 && logRecordCount in 1..30) {
+                            var logsRead = 0
+                            val transactionLogs = mutableListOf<Map<String, EnrichedTagData>>()
+                            
+                            // Read each transaction log record
+                            for (recordNum in 1..logRecordCount) {
+                                val logP2 = (logSfi shl 3) or 0x04
+                                val logReadCommand = byteArrayOf(0x00, 0xB2.toByte(), recordNum.toByte(), logP2.toByte(), 0x00)
+                                val logReadResponse = if (isoDep != null) isoDep.transceive(logReadCommand) else null
+                                
+                                if (logReadResponse != null) {
+                                    val logReadHex = logReadResponse.joinToString("") { "%02X".format(it) }
+                                    val logStatusWord = if (logReadHex.length >= 4) logReadHex.takeLast(4) else "UNKNOWN"
+                                    
+                                    if (logStatusWord == "9000") {
+                                        logsRead++
+                                        
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", recordNum, logP2) + "00",
+                                            logReadHex,
+                                            logStatusWord,
+                                            "READ TRANSACTION LOG #$recordNum",
+                                            0L
+                                        )
+                                        
+                                        // Parse log entry
+                                        val logBytes = logReadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                                        val logParseResult = EmvTlvParser.parseResponse(logBytes, "TRANSACTION_LOG", "LOG$recordNum")
+                                        
+                                        transactionLogs.add(logParseResult.tags)
+                                        currentSessionData?.allTags?.putAll(logParseResult.tags)
+                                        
+                                        Timber.i("✅ Transaction Log #$recordNum: ${logParseResult.tags.size} tags")
+                                        
+                                        // Log key transaction data
+                                        val amount = logParseResult.tags["9F02"]?.valueDecoded ?: "N/A"
+                                        val date = logParseResult.tags["9A"]?.valueDecoded ?: "N/A"
+                                        val country = logParseResult.tags["9F1A"]?.valueDecoded ?: "N/A"
+                                        Timber.i("   Amount: $amount, Date: $date, Country: $country")
+                                    } else if (logStatusWord == "6A83") {
+                                        // Record not found - end of logs
+                                        Timber.i("Transaction log #$recordNum not found - end of logs")
+                                        break
+                                    } else {
+                                        Timber.w("Transaction log #$recordNum failed: SW=$logStatusWord")
+                                        addApduLogEntry(
+                                            "00B2" + String.format("%02X%02X", recordNum, logP2) + "00",
+                                            logReadHex,
+                                            logStatusWord,
+                                            "READ TRANSACTION LOG #$recordNum - FAILED",
+                                            0L
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            Timber.i("TRANSACTION LOG READING COMPLETE: $logsRead / $logRecordCount logs read")
+                            
+                            withContext(Dispatchers.Main) {
+                                statusMessage = "Transaction logs: $logsRead / $logRecordCount read ✅"
+                            }
+                            
+                            // Store transaction logs in session
+                            if (transactionLogs.isNotEmpty()) {
+                                currentSessionData?.let { session ->
+                                    // Add transaction logs as special records
+                                    session.recordResponses.addAll(transactionLogs)
+                                }
+                            }
+                        } else {
+                            Timber.w("Invalid Log Format parsed: SFI=$logSfi, Count=$logRecordCount - skipping")
+                        }
+                    } else {
+                        Timber.w("Log Format too short: ${logFormatBytes.size} bytes - expected 2+")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to parse Log Format: $logFormatValue")
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "Transaction log parsing failed"
+                    }
+                }
+                
+                Timber.i("=".repeat(80))
+                Timber.i("PHASE 7 COMPLETE: Transaction log reading finished")
+                Timber.i("=".repeat(80))
+            } else {
+                Timber.i("=".repeat(80))
+                Timber.i("PHASE 7: TRANSACTION LOGS - SKIPPED (Log Format 9F4F not found)")
+                Timber.i("=".repeat(80))
+                
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Transaction logs: Not supported by card"
+                }
+            }
+            
+            // Phase 8: Final Processing
+            withContext(Dispatchers.Main) {
+                currentPhase = "Scan Complete"
+                progress = 1.0f
+                statusMessage = "EMV scan complete - PROXMARK3 workflow ✅"
+            }
+            
         } catch (e: Exception) {
-            Timber.e(e, "Failed to parse Log Format")
-        }
-    }
-    
-    /** Finalize Session */
-    private suspend fun finalizeSession(cardId: String, tag: android.nfc.Tag) {
-        withContext(Dispatchers.Main) {
-            currentPhase = "Finalizing"
-            progress = 1.0f
-            statusMessage = "EMV scan complete - Saving data..."
+            Timber.e(e, "EMV communication error")
+            withContext(Dispatchers.Main) {
+                statusMessage = "EMV Error: ${e.message}"
+            }
+        } finally {
+            if (isoDep != null) {
+                isoDep.close()
+            }
         }
         
+        // Extract and create comprehensive EMV card data
         val extractedData = createEmvCardData(cardId, tag)
         
-        val virtualCard = VirtualCard(
-            cardholderName = extractedData.cardholderName ?: "UNKNOWN",
+        // Create virtual card with extracted data
+        val virtualCard = com.nfsp00f33r.app.data.VirtualCard(
+            cardholderName = extractedData.cardholderName ?: "MASTERCARD DEBIT",
             maskedPan = extractedData.getUnmaskedPan(),
             expiryDate = extractedData.expiryDate?.let { exp ->
                 if (exp.length == 4) "${exp.substring(2, 4)}/${exp.substring(0, 2)}" else exp
-            } ?: "MM/YY",
+            } ?: "25/12",
             apduCount = apduLog.size,
             cardType = extractedData.getCardBrandDisplayName(),
             isEncrypted = extractedData.hasEncryptedData(),
@@ -876,19 +1431,71 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         )
         scannedCards = scannedCards + virtualCard
         
+        // Complete
+        withContext(Dispatchers.Main) {
+            currentPhase = "Scan Complete"
+            progress = 1.0f
+            statusMessage = "EMV scan complete - ${apduLog.size} APDUs, Full data extracted"
+            scanState = ScanState.SCAN_COMPLETE
+        }
+        
+        Timber.i("Proxmark3 EMV workflow complete: PAN=${extractedData.pan}, APDUs=${apduLog.size}")
+        
+        // PHASE 9: Export EMV data to JSON (optional for research)
+        try {
+            val jsonExport = exportEmvDataToJson(extractedData, apduLog)
+            Timber.i("PHASE 9: JSON export generated (${jsonExport.length} chars)")
+            // Optionally save to file or share - for now just log availability
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 9: JSON export failed")
+        }
+        
+        // PHASE 3E: Save complete session to Room database
         delay(500)
         saveSessionToDatabase()
         
+        // OLD: Auto-save to CardDataStore (PHASE 7: Will be removed)
+        // saveCardProfile(extractedData)
+        
+        // Load saved data from database to display (fixes tag display issues)
         withContext(Dispatchers.Main) {
             parsedEmvFields = extractedData.emvTags
             statusMessage = "Card saved to database - Ready for next scan"
             scanState = ScanState.IDLE
-            currentPhase = "Complete"
+            
+            // Auto-dump EMV data to Timber for debugging
+            if (parsedEmvFields.isNotEmpty()) {
+                Timber.i("=".repeat(80))
+                Timber.i("FULL EMV DATA - ${parsedEmvFields.size} fields")
+                Timber.i("=".repeat(80))
+                parsedEmvFields.forEach { (key, fieldValue) ->
+                    val displayKey = if (key.matches(Regex("^[0-9A-F]+$"))) {
+                        val tagName = com.nfsp00f33r.app.cardreading.EmvTagDictionary.getTagDescription(key)
+                        "$key - $tagName"
+                    } else {
+                        key.uppercase().replace("_", " ")
+                    }
+                    Timber.i("$displayKey: $fieldValue")
+                }
+                Timber.i("=".repeat(80))
+            }
+            
+            // Auto-dump APDU log to Timber for debugging
+            if (apduLog.isNotEmpty()) {
+                Timber.i("=".repeat(80))
+                Timber.i("FULL APDU LOG - ${apduLog.size} commands")
+                Timber.i("=".repeat(80))
+                apduLog.forEachIndexed { index, entry ->
+                    Timber.i("")
+                    Timber.i("[$index] ${entry.description}")
+                    Timber.i("  TX: ${entry.command}")
+                    Timber.i("  RX: ${entry.response}")
+                    Timber.i("  SW: ${entry.statusWord}")
+                }
+                Timber.i("=".repeat(80))
+            }
         }
-        
-        Timber.i("SESSION FINALIZED - ${apduLog.size} APDUs, ${extractedData.emvTags.size} tags")
     }
-    
     
     /**
      * Add APDU log entry with timestamp and real status word interpretation
@@ -922,6 +1529,94 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * Interpret real status word meanings
      */
+    /**
+     * Export comprehensive EMV data to JSON format
+     * PHASE 9 ENHANCEMENT: Data persistence for research and analysis
+     */
+    private fun exportEmvDataToJson(cardData: com.nfsp00f33r.app.data.EmvCardData, apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
+        try {
+            val jsonObject = org.json.JSONObject()
+            
+            // Metadata
+            jsonObject.put("timestamp", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).format(java.util.Date()))
+            jsonObject.put("exportVersion", "1.0")
+            jsonObject.put("source", "nf-sp00f33r EMV Scanner")
+            
+            // Card Information
+            val cardInfo = org.json.JSONObject()
+            cardInfo.put("pan", cardData.pan ?: "")
+            cardInfo.put("cardholderName", cardData.cardholderName ?: "")
+            cardInfo.put("expiryDate", cardData.expiryDate ?: "")
+            cardInfo.put("cardType", cardData.detectCardType().name)
+            cardInfo.put("issuerCountryCode", cardData.issuerCountryCode ?: "")
+            cardInfo.put("serviceCode", cardData.serviceCode ?: "")
+            cardInfo.put("cardUid", cardData.cardUid ?: "")
+            jsonObject.put("cardInfo", cardInfo)
+            
+            // AIDs (Multi-AID support from PHASE 1)
+            val aidsArray = org.json.JSONArray()
+            cardData.availableAids.forEach { aid ->
+                aidsArray.put(aid)
+            }
+            if (aidsArray.length() == 0 && cardData.selectedAid != null) {
+                aidsArray.put(cardData.selectedAid)
+            }
+            jsonObject.put("aids", aidsArray)
+            
+            // Security Analysis (from PHASE 3)
+            val securityInfo = org.json.JSONObject()
+            // Extract AIP for security analysis
+            val aipHex = cardData.applicationInterchangeProfile ?: extractAipFromAllResponses(apduLog)
+            if (aipHex.isNotEmpty()) {
+                val secAnalysis = analyzeAip(aipHex)
+                securityInfo.put("hasSDA", secAnalysis.hasSDA)
+                securityInfo.put("hasDDA", secAnalysis.hasDDA)
+                securityInfo.put("hasCDA", secAnalysis.hasCDA)
+                securityInfo.put("isWeak", secAnalysis.isWeak)
+                securityInfo.put("summary", secAnalysis.summary)
+                securityInfo.put("aip", aipHex)
+            }
+            // ROCA Vulnerability
+            securityInfo.put("rocaVulnerable", cardData.rocaVulnerable)
+            securityInfo.put("rocaStatus", cardData.rocaVulnerabilityStatus ?: "")
+            jsonObject.put("securityInfo", securityInfo)
+            
+            // EMV Tags
+            val emvTagsObject = org.json.JSONObject()
+            cardData.emvTags.entries.forEach { (key, value) ->
+                emvTagsObject.put(key, value)
+            }
+            jsonObject.put("emvTags", emvTagsObject)
+            
+            // APDU Log
+            val apduArray = org.json.JSONArray()
+            apduLog.forEach { entry ->
+                val apduEntry = org.json.JSONObject()
+                apduEntry.put("command", entry.command)
+                apduEntry.put("response", entry.response)
+                apduEntry.put("statusWord", entry.statusWord)
+                apduEntry.put("description", entry.description)
+                apduEntry.put("timestamp", entry.timestamp)
+                apduArray.put(apduEntry)
+            }
+            jsonObject.put("apduLog", apduArray)
+            
+            // Cryptographic Data
+            val cryptoData = org.json.JSONObject()
+            cryptoData.put("ac", cardData.applicationCryptogram ?: "")
+            cryptoData.put("cid", cardData.cryptogramInformationData ?: "")
+            cryptoData.put("atc", cardData.applicationTransactionCounter ?: "")
+            cryptoData.put("un", cardData.unpredictableNumber ?: "")
+            cryptoData.put("iad", cardData.issuerApplicationData ?: "")
+            jsonObject.put("cryptoData", cryptoData)
+            
+            // Format with indentation for readability
+            return jsonObject.toString(2)
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 9: Error building JSON export")
+            return "{\"error\": \"${e.message}\"}"
+        }
+    }
     
     private fun interpretStatusWord(statusWord: String): String {
         return when (statusWord.uppercase()) {
@@ -1021,7 +1716,35 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         // Sort by priority (lower number = higher priority)
         return aids.sortedBy { it.priority }
     }
-
+    
+    /**
+     * Legacy function for backward compatibility - delegates to extractAllAidsFromPpse
+     */
+    @Deprecated("Use extractAllAidsFromPpse() for multi-AID support", ReplaceWith("extractAllAidsFromPpse(hexResponse).map { it.aid }"))
+    private fun extractAidsFromPpseResponse(hexResponse: String): List<String> {
+        return extractAllAidsFromPpse(hexResponse).map { it.aid }
+    }
+    
+    /**
+     * Extract FCI from AID selection response - LIVE ANALYSIS
+     */
+    private fun extractFciFromAidResponse(hexResponse: String): String {
+        try {
+            // Look for FCI Template (6F)
+            val fciRegex = "6F([0-9A-F]{2})([0-9A-F]+)".toRegex()
+            val match = fciRegex.find(hexResponse)
+            if (match != null) {
+                return match.groupValues[2]
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error extracting FCI")
+        }
+        return ""
+    }
+    
+    /**
+     * Parse AFL to determine which records to read - LIVE ANALYSIS
+     */
     /**
      * Parse AFL for record reading - ENHANCED to read ALL records from ALL SFIs
      * Proxmark3-inspired: Complete AFL traversal for full data extraction
@@ -1090,36 +1813,102 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      * Uses SecureRandom for unpredictable number (9F37) and current date (9A)
      * Proxmark3-inspired dynamic data generation
      */
-    /**
-     * Build dynamic PDOL data using TransactionParameterManager
-     * Proxmark3-inspired: Uses terminal configuration and transaction parameters
-     * 
-     * ENHANCEMENT: Now uses TransactionType to set TTQ (tag 9F66) dynamically
-     */
     private fun buildPdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
         val dataList = mutableListOf<Byte>()
+        val secureRandom = SecureRandom()
+        val dateFormat = SimpleDateFormat("yyMMdd", Locale.US)
+        val currentDate = dateFormat.format(Date())
         
-        // Build terminal data map with current transaction parameters
-        val terminalDataMap = transactionParamManager.buildTerminalDataMap(
-            transactionType = selectedTransactionType,
-            amountAuthorised = transactionAmountCents,
-            amountOther = 0L,
-            transactionTypeCode = TransactionParameterManager.TransactionTypeCode.GOODS_AND_SERVICES
-        )
-        
-        Timber.d("🔨 Building PDOL data for ${dolEntries.size} entries (Type: ${selectedTransactionType.label})")
+        Timber.d("Building PDOL data for ${dolEntries.size} entries")
         
         for (entry in dolEntries) {
-            val tagData = transactionParamManager.getTerminalData(
-                tag = entry.tag,
-                length = entry.length,
-                transactionType = selectedTransactionType
-            )
-            
-            // Log each PDOL tag for debugging
-            val tagHex = tagData.joinToString("") { "%02X".format(it) }
-            val tagName = EmvTagDictionary.getTagDescription(entry.tag)
-            Timber.d("  PDOL: ${entry.tag} ($tagName) = $tagHex")
+            val tagData = when (entry.tag.uppercase()) {
+                "9F37" -> {
+                    // Unpredictable Number - 4 bytes, cryptographically secure random
+                    val un = ByteArray(entry.length)
+                    secureRandom.nextBytes(un)
+                    Timber.d("PDOL: 9F37 (Unpredictable Number) = ${un.joinToString("") { "%02X".format(it) }}")
+                    un
+                }
+                "9A" -> {
+                    // Transaction Date - YYMMDD format
+                    val dateBytes = ByteArray(entry.length)
+                    val dateHex = currentDate.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    System.arraycopy(dateHex, 0, dateBytes, 0, minOf(dateHex.size, entry.length))
+                    Timber.d("PDOL: 9A (Transaction Date) = $currentDate")
+                    dateBytes
+                }
+                "9C" -> {
+                    // Transaction Type - 0x00 for goods/services
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "5F2A" -> {
+                    // Transaction Currency Code - 0x0840 for USD
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "9F02" -> {
+                    // Amount, Authorised - 6 bytes BCD, amount 000000000000 (0.00)
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F03" -> {
+                    // Amount, Other - 6 bytes BCD, usually 0
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F1A" -> {
+                    // Terminal Country Code - 0x0840 for USA
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "9F33" -> {
+                    // Terminal Capabilities - typical POS capabilities
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xE0.toByte() // Manual key entry, Magnetic stripe, IC with contacts
+                            1 -> 0xF0.toByte() // Plaintext PIN, Enciphered PIN online, Signature, Enciphered PIN offline, No CVM
+                            2 -> 0xC8.toByte() // SDA, DDA, Card capture
+                            else -> 0x00
+                        }
+                    }
+                }
+                "9F35" -> {
+                    // Terminal Type - 0x22 for attended online-only
+                    ByteArray(entry.length) { 0x22 }
+                }
+                "9F40" -> {
+                    // Additional Terminal Capabilities - typical POS
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xF0.toByte() // Cash, goods, services, cashback, inquiry, transfer, payment, administrative
+                            1 -> 0x00
+                            2 -> 0xF0.toByte() // Numeric keys, alphabetic, special, command
+                            3 -> 0x00
+                            4 -> 0x00
+                            else -> 0x00
+                        }
+                    }
+                }
+                "95" -> {
+                    // Terminal Verification Results (TVR) - 5 bytes, all zeros indicates no errors
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F66" -> {
+                    // Terminal Transaction Qualifiers (TTQ) - 4 bytes
+                    // Request maximum EMV data including all records and tags
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xF6.toByte() // MSD, qVSDC, EMV contact chip, Online PIN, Signature, ODA for Online Auth, CDA, Issuer Update Processing
+                            1 -> 0x20.toByte() // EMV mode supported
+                            2 -> 0xC0.toByte() // CVM required, Online PIN required
+                            3 -> 0x80.toByte() // Issuer script processing supported
+                            else -> 0x00
+                        }
+                    }
+                }
+                else -> {
+                    // Unknown tag - fill with zeros
+                    Timber.w("PDOL: Unknown tag ${entry.tag} - filling with zeros")
+                    ByteArray(entry.length) { 0x00 }
+                }
+            }
             
             dataList.addAll(tagData.toList())
         }
@@ -1128,42 +1917,83 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val totalLength = dataList.size
         val result = byteArrayOf(0x83.toByte(), totalLength.toByte()) + dataList.toByteArray()
         
-        Timber.i("✅ Built PDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes, TTQ=${selectedTransactionType.ttqByte1})")
+        Timber.i("Built PDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
         return result
     }
     
     /**
      * Build dynamic CDOL data for GENERATE AC command
-     * Proxmark3-inspired: Uses terminal parameters + extracts card-specific data
-     * 
-     * ENHANCEMENT: Uses TransactionParameterManager for terminal data,
-     * extracts ATC/IAD from previous responses for card-specific data
+     * PHASE 7 ENHANCED: Handle all tag types properly for GENERATE AC
+     * Similar to PDOL but uses actual transaction data from card session
+     * Proxmark3-inspired GENERATE AC data generation
      */
     private fun buildCdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
         val dataList = mutableListOf<Byte>()
+        val secureRandom = SecureRandom()
+        val dateFormat = SimpleDateFormat("yyMMdd", Locale.US)
+        val currentDate = dateFormat.format(Date())
         
-        // Build terminal data map with current transaction parameters
-        val terminalDataMap = transactionParamManager.buildTerminalDataMap(
-            transactionType = selectedTransactionType,
-            amountAuthorised = transactionAmountCents,
-            amountOther = 0L,
-            transactionTypeCode = TransactionParameterManager.TransactionTypeCode.GOODS_AND_SERVICES
-        )
-        
-        Timber.d("🔨 Building CDOL data for ${dolEntries.size} entries (Decision: ${selectedTerminalDecision.label})")
+        Timber.i("PHASE 7: Building CDOL data for ${dolEntries.size} entries")
         
         for (entry in dolEntries) {
             val tagData = when (entry.tag.uppercase()) {
+                "9F37" -> {
+                    // Unpredictable Number - use fresh random for GENERATE AC
+                    val un = ByteArray(entry.length)
+                    secureRandom.nextBytes(un)
+                    Timber.d("CDOL: 9F37 (Unpredictable Number) = ${un.joinToString("") { "%02X".format(it) }}")
+                    un
+                }
+                "9A" -> {
+                    // Transaction Date - YYMMDD format
+                    val dateBytes = ByteArray(entry.length)
+                    val dateHex = currentDate.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    System.arraycopy(dateHex, 0, dateBytes, 0, minOf(dateHex.size, entry.length))
+                    Timber.d("CDOL: 9A (Transaction Date) = $currentDate")
+                    dateBytes
+                }
+                "9C" -> {
+                    // Transaction Type - 0x00 for goods/services
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "5F2A" -> {
+                    // Transaction Currency Code - 0x0840 for USD
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "9F02" -> {
+                    // Amount, Authorised - 6 bytes BCD
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F03" -> {
+                    // Amount, Other - 6 bytes BCD
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F1A" -> {
+                    // Terminal Country Code - 0x0840 for USA
+                    ByteArray(entry.length) { i -> if (i == 0) 0x08 else 0x40 }
+                }
+                "95" -> {
+                    // Terminal Verification Results (TVR) - 5 bytes
+                    ByteArray(entry.length) { 0x00 }
+                }
+                "9F66" -> {
+                    // Terminal Transaction Qualifiers (TTQ) - 4 bytes
+                    ByteArray(entry.length) { i ->
+                        when (i) {
+                            0 -> 0xF6.toByte()
+                            1 -> 0x20.toByte()
+                            2 -> 0xC0.toByte()
+                            3 -> 0x80.toByte()
+                            else -> 0x00
+                        }
+                    }
+                }
                 "9F36" -> {
                     // ATC (Application Transaction Counter) - extract from previous responses
                     val atcHex = extractAtcFromAllResponses(apduLog)
                     if (atcHex.isNotEmpty()) {
-                        val atcBytes = atcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                        Timber.d("  CDOL: 9F36 (ATC) = $atcHex [from card]")
-                        if (atcBytes.size == entry.length) atcBytes
-                        else atcBytes + ByteArray(entry.length - atcBytes.size) { 0x00 }
+                        atcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                     } else {
-                        Timber.w("  CDOL: 9F36 (ATC) not found, using zeros")
                         ByteArray(entry.length) { 0x00 }
                     }
                 }
@@ -1172,39 +2002,123 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     val iadHex = extractIadFromAllResponses(apduLog)
                     if (iadHex.isNotEmpty()) {
                         val iadBytes = iadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                        Timber.d("  CDOL: 9F10 (IAD) = $iadHex [from card]")
                         if (iadBytes.size <= entry.length) {
                             iadBytes + ByteArray(entry.length - iadBytes.size) { 0x00 }
                         } else {
                             iadBytes.take(entry.length).toByteArray()
                         }
                     } else {
-                        Timber.w("  CDOL: 9F10 (IAD) not found, using zeros")
                         ByteArray(entry.length) { 0x00 }
                     }
                 }
                 else -> {
-                    // Use terminal parameter manager for all other tags
-                    val data = transactionParamManager.getTerminalData(
-                        tag = entry.tag,
-                        length = entry.length,
-                        transactionType = selectedTransactionType
-                    )
-                    val tagName = EmvTagDictionary.getTagDescription(entry.tag)
-                    val dataHex = data.joinToString("") { "%02X".format(it) }
-                    Timber.d("  CDOL: ${entry.tag} ($tagName) = $dataHex [from terminal]")
-                    data
+                    // Unknown tag - fill with zeros
+                    Timber.w("CDOL: Unknown tag ${entry.tag} - filling with zeros")
+                    ByteArray(entry.length) { 0x00 }
                 }
             }
             
             dataList.addAll(tagData.toList())
         }
         
+        val totalLength = dataList.size
         val result = dataList.toByteArray()
-        Timber.i("✅ Built CDOL data: ${result.joinToString("") { "%02X".format(it) }} (${result.size} bytes)")
+        
+        Timber.i("PHASE 7: Built CDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes)")
         return result
     }
     
+    /**
+     * Parse CDOL structure to extract tag-length pairs
+     * PHASE 7 ENHANCEMENT: Handle 1-byte and 2-byte tags properly
+     */
+    private fun parseCdol(cdolHex: String): List<EmvTlvParser.DolEntry> {
+        Timber.d("PHASE 7: Parsing CDOL structure: $cdolHex")
+        
+        // Use existing EmvTlvParser.parseDol which handles both 1-byte and 2-byte tags
+        val entries = EmvTlvParser.parseDol(cdolHex)
+        
+        Timber.i("PHASE 7: CDOL parsed - ${entries.size} entries")
+        entries.forEachIndexed { idx, entry ->
+            Timber.d("  Entry ${idx + 1}: Tag ${entry.tag}, Length ${entry.length}")
+        }
+        
+        return entries
+    }
+    
+    /**
+     * Build GENERATE AC APDU command
+     * PHASE 10 ENHANCEMENT: Flexible AC type selection
+     * 
+     * @param acType: 0x00 = AAC (Application Authentication Cryptogram - decline)
+     *                0x40 = TC (Transaction Certificate - offline approval)
+     *                0x80 = ARQC (Authorization Request Cryptogram - online request)
+     * @param cdolData: Command data built from CDOL1
+     * @return Complete GENERATE AC APDU (CLA INS P1 P2 Lc Data Le)
+     */
+    private fun buildGenerateAcApdu(acType: Byte, cdolData: ByteArray): ByteArray {
+        Timber.d("PHASE 10: Building GENERATE AC APDU - AC Type: 0x${"%02X".format(acType)}, Data Length: ${cdolData.size}")
+        
+        // Command structure: CLA=0x80, INS=0xAE, P1=acType, P2=0x00, Lc, Data, Le=0x00
+        val apdu = if (cdolData.isNotEmpty()) {
+            // Case 4 command: With command data and expecting response
+            byteArrayOf(0x80.toByte(), 0xAE.toByte(), acType, 0x00.toByte(), cdolData.size.toByte()) + cdolData + byteArrayOf(0x00)
+        } else {
+            // Case 2 command: No command data, only expecting response
+            byteArrayOf(0x80.toByte(), 0xAE.toByte(), acType, 0x00.toByte(), 0x00)
+        }
+        
+        val apduHex = apdu.joinToString("") { "%02X".format(it) }
+        Timber.i("PHASE 10: GENERATE AC APDU built - ${apdu.size} bytes: $apduHex")
+        return apdu
+    }
+    
+    /**
+     * Parse GENERATE AC response for cryptogram analysis
+     * PHASE 10 ENHANCEMENT: Structured AC response parsing
+     */
+    private fun parseGenerateAcResponse(responseHex: String): GenerateAcResult {
+        Timber.d("PHASE 10: Parsing GENERATE AC response: $responseHex")
+        
+        // Extract status word
+        val statusWord = if (responseHex.length >= 4) responseHex.takeLast(4) else "UNKNOWN"
+        val dataHex = if (responseHex.length > 4) responseHex.dropLast(4) else ""
+        
+        // Parse response using TLV parser for tags like:
+        // 9F27 (CID - Cryptogram Information Data)
+        // 9F36 (ATC - Application Transaction Counter)
+        // 9F26 (AC - Application Cryptogram)
+        var cid = ""
+        var atc = ""
+        var ac = ""
+        
+        if (dataHex.isNotEmpty()) {
+            try {
+                // Convert hex string to ByteArray for parser
+                val dataBytes = dataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                val parseResult = EmvTlvParser.parseEmvTlvData(dataBytes, "GEN_AC", validateTags = true)
+                cid = parseResult.tags["9F27"] ?: ""
+                atc = parseResult.tags["9F36"] ?: ""
+                ac = parseResult.tags["9F26"] ?: ""
+                
+                Timber.i("PHASE 10: AC Response parsed - CID: $cid, ATC: $atc, AC: ${ac.take(16)}...")
+            } catch (e: Exception) {
+                Timber.e(e, "PHASE 10: Failed to parse GENERATE AC response TLV")
+            }
+        }
+        
+        return GenerateAcResult(statusWord, cid, atc, ac)
+    }
+    
+    /**
+     * Data class for GENERATE AC response
+     */
+    private data class GenerateAcResult(
+        val statusWord: String,
+        val cid: String,
+        val atc: String,
+        val ac: String
+    )
     
     /**
      * Build INTERNAL AUTHENTICATE APDU command
@@ -1233,6 +2147,66 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return apdu
     }
     
+    /**
+     * Parse INTERNAL AUTHENTICATE response for SDAD
+     * PHASE 11 ENHANCEMENT: Extract Signed Dynamic Application Data
+     */
+    private fun parseInternalAuthResponse(responseHex: String): InternalAuthResult {
+        Timber.d("PHASE 11: Parsing INTERNAL AUTHENTICATE response: $responseHex")
+        
+        // Extract status word
+        val statusWord = if (responseHex.length >= 4) responseHex.takeLast(4) else "UNKNOWN"
+        val dataHex = if (responseHex.length > 4) responseHex.dropLast(4) else ""
+        
+        // Parse response for SDAD (Signed Dynamic Application Data)
+        // Tag 9F4B contains the signed data
+        var sdad = ""
+        var iccDynamicNumber = ""
+        
+        if (dataHex.isNotEmpty()) {
+            try {
+                // Convert hex string to ByteArray for parser
+                val dataBytes = dataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                val parseResult = EmvTlvParser.parseEmvTlvData(dataBytes, "INT_AUTH", validateTags = true)
+                sdad = parseResult.tags["9F4B"] ?: "" // Signed Dynamic Application Data
+                iccDynamicNumber = parseResult.tags["9F4C"] ?: "" // ICC Dynamic Number
+                
+                Timber.i("PHASE 11: INTERNAL AUTHENTICATE Response - SDAD: ${sdad.take(32)}..., ICC DN: $iccDynamicNumber")
+            } catch (e: Exception) {
+                Timber.e(e, "PHASE 11: Failed to parse INTERNAL AUTHENTICATE response TLV")
+            }
+        }
+        
+        return InternalAuthResult(statusWord, sdad, iccDynamicNumber)
+    }
+    
+    /**
+     * Data class for INTERNAL AUTHENTICATE response
+     */
+    private data class InternalAuthResult(
+        val statusWord: String,
+        val sdad: String,           // Signed Dynamic Application Data (9F4B)
+        val iccDynamicNumber: String // ICC Dynamic Number (9F4C)
+    )
+    
+    /**
+     * Check if card supports DDA (Dynamic Data Authentication)
+     * PHASE 11 HELPER: Analyze AIP byte 1 bit 6
+     */
+    private fun supportsDda(aipHex: String): Boolean {
+        if (aipHex.length < 2) return false
+        
+        try {
+            val byte1 = aipHex.substring(0, 2).toInt(16)
+            // Bit 6 of byte 1 (0x20) = DDA supported
+            val ddaSupported = (byte1 and 0x20) != 0
+            Timber.d("PHASE 11: AIP=$aipHex, Byte1=0x${"%02X".format(byte1)}, DDA=$ddaSupported")
+            return ddaSupported
+        } catch (e: Exception) {
+            Timber.e(e, "PHASE 11: Failed to parse AIP for DDA check")
+            return false
+        }
+    }
     
     /**
      * Test for ROCA vulnerability (CVE-2017-15361)
@@ -1377,6 +2351,76 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val details: String = ""
     )
     
+    /**
+     * Extract detailed EMV data from response - COMPREHENSIVE PARSING
+     */
+    /**
+     * Extract detailed EMV data using comprehensive TLV parser
+     */
+    private fun extractDetailedEmvData(hexResponse: String): Map<String, String> {
+        val details = mutableMapOf<String, String>()
+        
+        try {
+            // Convert hex string to byte array
+            val responseBytes = hexResponse.chunked(2).mapNotNull { 
+                it.toIntOrNull(16)?.toByte() 
+            }.toByteArray()
+            
+            // Parse ALL TLV tags comprehensively using EmvTlvParser
+            val parseResult = EmvTlvParser.parseEmvTlvData(
+                responseBytes, 
+                "DetailedExtraction", 
+                validateTags = true
+            )
+            
+            Timber.d("🔍 extractDetailedEmvData: Parsed ${parseResult.tags.size} tags from response")
+            
+            // Process all parsed tags
+            parseResult.tags.forEach { (tag, value) ->
+                val tagName = EmvTagDictionary.getTagDescription(tag)
+                val fieldKey = tagName.lowercase().replace(" ", "_")
+                
+                // Special processing for specific tags
+                val processedValue = when (tag) {
+                    "5A" -> formatPan(value) // PAN
+                    "57" -> formatTrack2(value) // Track 2
+                    "5F20" -> hexToAscii(value) // Cardholder Name
+                    "5F24" -> formatExpiryDate(value) // Expiry Date
+                    "5F25" -> formatEffectiveDate(value) // Effective Date
+                    "84" -> hexToAscii(value) // DF Name
+                    "50" -> hexToAscii(value) // Application Label
+                    "9F12" -> hexToAscii(value) // Application Preferred Name
+                    else -> value
+                }
+                
+                details[fieldKey] = processedValue
+                details["raw_$tag"] = value
+                
+                Timber.d("  📋 $tag ($tagName) = ${value.take(32)}${if (value.length > 32) "..." else ""}")
+            }
+            
+            // Add parse statistics
+            details["_total_tags"] = parseResult.tags.size.toString()
+            details["_valid_tags"] = parseResult.validTags.toString()
+            details["_invalid_tags"] = parseResult.invalidTags.toString()
+            details["_template_depth"] = parseResult.templateDepth.toString()
+            
+            if (parseResult.errors.isNotEmpty()) {
+                details["_parse_errors"] = parseResult.errors.joinToString("; ")
+                Timber.w("⚠️ Parse errors: ${parseResult.errors.joinToString(", ")}")
+            }
+            
+            if (parseResult.warnings.isNotEmpty()) {
+                details["_parse_warnings"] = parseResult.warnings.joinToString("; ")
+                Timber.w("⚠️ Parse warnings: ${parseResult.warnings.joinToString(", ")}")
+            }
+            
+        } catch (e: Exception) {
+            Timber.e(e, "Error extracting detailed EMV data with EmvTlvParser")
+        }
+        
+        return details
+    }
     
     /**
      * Format PAN for display
@@ -2556,32 +3600,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     /**
      * PHASE 3E: Save complete EMV session to Room database
      */
-    /**
-     * Build AidData list from multi-AID responses
-     * Each AID gets its own isolated tag set (no merging/overwrites)
-     */
-    private fun buildAidDataList(aidResponses: List<Map<String, EnrichedTagData>>): List<com.nfsp00f33r.app.storage.emv.AidData> {
-        return aidResponses.mapIndexed { index, aidTags ->
-            val aid = aidTags["4F"]?.value ?: "Unknown_AID_$index"
-            val label = aidTags["50"]?.valueDecoded ?: "Unknown Application"
-            val priority = aidTags["87"]?.value?.toIntOrNull(16) ?: (index + 1)
-            val pdol = aidTags["9F38"]?.value
-            val afl = aidTags["94"]?.value
-            val languagePreference = aidTags["5F2D"]?.valueDecoded
-            
-            Timber.d("📋 AID ${index + 1}: $aid - $label (${aidTags.size} tags)")
-            
-            com.nfsp00f33r.app.storage.emv.AidData(
-                aid = aid,
-                label = label,
-                priority = priority,
-                pdol = pdol,
-                afl = afl,
-                languagePreference = languagePreference
-            )
-        }
-    }
-    
     private suspend fun saveSessionToDatabase() {
         val sessionData = currentSessionData ?: run {
             Timber.w("PHASE 3E: No session data to save")
@@ -2659,7 +3677,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     )
                 },
                 ppseData = null, // TODO: Build structured phase data
-                aidsData = buildAidDataList(sessionData.aidResponses),
+                aidsData = emptyList(),
                 gpoData = null,
                 recordsData = emptyList(),
                 cryptogramData = null,
@@ -2672,12 +3690,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             withContext(Dispatchers.IO) {
                 emvSessionDao.insert(entity)
                 Timber.i("PHASE 3E: Session ${sessionData.sessionId} saved to Room database")
-                Timber.i("  - ${allTags.size} total tags (merged from all AIDs)")
-                Timber.i("  - ${entity.aidsData.size} AIDs processed:")
-                entity.aidsData.forEachIndexed { index, aidData ->
-                    val aidTagCount = sessionData.aidResponses.getOrNull(index)?.size ?: 0
-                    Timber.i("    AID ${index + 1}: ${aidData.label} - $aidTagCount tags")
-                }
+                Timber.i("  - ${allTags.size} total tags")
                 Timber.i("  - ${sessionData.totalApdus} APDUs (${sessionData.successfulApdus} successful)")
                 Timber.i("  - ${sessionData.recordResponses.size} records")
                 Timber.i("  - Scan duration: ${scanDuration}ms")
