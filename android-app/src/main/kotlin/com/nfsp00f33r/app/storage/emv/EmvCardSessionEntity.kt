@@ -88,6 +88,9 @@ data class EmvCardSessionEntity(
     val gpoData: GpoData?,
     val recordsData: List<RecordData>,
     val cryptogramData: CryptogramData?,
+    // AFL/READ validation summary - optional short summary and detailed failures
+    val aflMismatchSummary: String?,
+    val aflReadFailures: List<String>,
     
     // === STATS ===
     val totalApdus: Int,
@@ -269,6 +272,21 @@ class EmvCardSessionConverters {
     
     @TypeConverter
     fun toRecordDataList(value: String): List<RecordData> {
+        return try {
+            json.decodeFromString(value)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // === List<String> ===
+    @TypeConverter
+    fun fromStringList(value: List<String>): String {
+        return json.encodeToString(value)
+    }
+
+    @TypeConverter
+    fun toStringList(value: String): List<String> {
         return try {
             json.decodeFromString(value)
         } catch (e: Exception) {

@@ -272,7 +272,10 @@ class PmSessionAdapter {
             // Stats
             totalApdus = session.apduLog.size,
             totalTags = session.tlvDatabase.size,
-            recordCount = session.tlvDatabase.size
+            recordCount = session.tlvDatabase.size,
+            // AFL mismatch data (not tracked by PM reader - default to empty)
+            aflMismatchSummary = null,
+            aflReadFailures = emptyList()
         )
     }
     

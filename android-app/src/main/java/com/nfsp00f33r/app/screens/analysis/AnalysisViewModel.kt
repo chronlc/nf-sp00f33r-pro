@@ -245,7 +245,9 @@ class AnalysisViewModel(private val context: Context) : ViewModel() {
                 // Create simplified report from pre-scanned data
                 val result = RocaBatchScanner.BatchScanReport(
                     totalCards = availableCards.size,
-                    cardsWithRsaKeys = availableCards.count { it.allEmvTags.containsKey("9F46") },
+                    cardsWithRsaKeys = availableCards.count { session ->
+                        session.allEmvTags.keys.any { k -> k == "9F46" || k.startsWith("9F46@") }
+                    },
                     vulnerableCards = vulnerableCards,
                     safeCards = availableCards.size - vulnerableCards,
                     criticalVulnerabilities = vulnerableCards,

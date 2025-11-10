@@ -135,8 +135,13 @@ object EmvSessionExporter {
             
             // Complete EMV tags (200+ tags with enriched data)
             put("emv_tags", JSONObject().apply {
-                session.allEmvTags.forEach { (tag, enrichedData) ->
-                    put(tag, JSONObject().apply {
+                session.allEmvTags.forEach { (rawKey, enrichedData) ->
+                    // Export each stored entry. Keys may be either plain tags ("5A") or
+                    // grouped occurrence keys ("4F@PPSE/61/4F"). Keep the raw key as the
+                    // JSON property name for uniqueness while also embedding a
+                    // canonical "tag" and optional "occurrence_path" inside the value.
+                    val occurrencePath = enrichedData.path ?: rawKey.substringAfter("@", "")
+                    put(rawKey, JSONObject().apply {
                         put("tag", enrichedData.tag)
                         put("name", enrichedData.name)
                         put("value", enrichedData.value)
@@ -144,6 +149,7 @@ object EmvSessionExporter {
                         put("phase", enrichedData.phase)
                         put("source", enrichedData.source)
                         put("length", enrichedData.length)
+                        if (occurrencePath.isNotEmpty()) put("occurrence_path", occurrencePath)
                     })
                 }
             })

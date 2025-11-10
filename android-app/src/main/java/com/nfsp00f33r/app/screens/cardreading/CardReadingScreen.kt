@@ -51,6 +51,7 @@ fun CardReadingScreen() {
         CardReadingViewModel.Factory(context).create(CardReadingViewModel::class.java)
     }
     
+    var showAdvancedSettings by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -63,29 +64,123 @@ fun CardReadingScreen() {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
         ) {
-                // Data-focused status header
-                StatusHeaderCard(viewModel)
-                
-                // Compact control panel
-                ControlPanelCard(viewModel)
-                
+            // Data-focused status header
+            StatusHeaderCard(viewModel)
+
+            // Compact control panel
+            ControlPanelCard(viewModel)
+
+            // Advanced Settings Toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = { showAdvancedSettings = !showAdvancedSettings }) {
+                    Icon(
+                        if (showAdvancedSettings) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null
+                    )
+                    Text(if (showAdvancedSettings) "Hide Advanced" else "Show Advanced", color = CardReadingColors.TextSecondary)
+                }
+            }
+            if (showAdvancedSettings) {
+                AdvancedSettingsSection(viewModel)
+            }
+
             // ROCA Vulnerability Status
             if (viewModel.rocaVulnerabilityStatus != null) {
                 RocaVulnerabilityStatusCard(viewModel)
             }
-            
+
             // Large data display area
             if (viewModel.scannedCards.isNotEmpty()) {
                 ActiveCardsSection(viewModel)
             }
-            
+
             // Real-time EMV data display
             if (viewModel.parsedEmvFields.isNotEmpty()) {
                 EmvDataDisplaySection(viewModel)
             }
-            
+
             // Terminal-style APDU log
             ApduTerminalSection(viewModel)
+        }
+    }
+}
+
+@Composable
+private fun AdvancedSettingsSection(viewModel: CardReadingViewModel) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = CardReadingColors.CardBackground),
+        shape = RoundedCornerShape(CardReadingRadius.Large),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(CardReadingSpacing.Large),
+            verticalArrangement = Arrangement.spacedBy(CardReadingSpacing.Medium)
+        ) {
+            Text("Advanced EMV Options", style = MaterialTheme.typography.titleSmall, color = CardReadingColors.Cyan)
+
+            // Transaction Amount
+            OutlinedTextField(
+                value = viewModel.advancedAmount,
+                onValueChange = { viewModel.advancedAmount = it },
+                label = { Text("Transaction Amount (e.g. 1.00)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // TTQ
+            OutlinedTextField(
+                value = viewModel.advancedTtq,
+                onValueChange = { viewModel.advancedTtq = it },
+                label = { Text("TTQ (hex, e.g. 36000000)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // Transaction Type
+            var expanded by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(viewModel.advancedTransactionType.label)
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                }
+                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    TransactionType.values().forEach { type ->
+                        DropdownMenuItem(
+                            text = { Text(type.label) },
+                            onClick = {
+                                viewModel.advancedTransactionType = type
+                                expanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            // Crypto Select
+            var cryptoExpanded by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { cryptoExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(viewModel.advancedCryptoSelect)
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                }
+                DropdownMenu(expanded = cryptoExpanded, onDismissRequest = { cryptoExpanded = false }) {
+                    listOf("ARQC", "TC", "AAC").forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option) },
+                            onClick = {
+                                viewModel.advancedCryptoSelect = option
+                                cryptoExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
 }

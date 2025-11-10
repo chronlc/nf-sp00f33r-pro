@@ -18,7 +18,7 @@ import androidx.room.TypeConverters
  */
 @Database(
     entities = [EmvCardSessionEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(EmvCardSessionConverters::class)

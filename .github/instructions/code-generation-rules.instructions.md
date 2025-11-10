@@ -1,214 +1,178 @@
-```instructions
-# Code Generation Rules - Copilot Edition
+---
+applyTo: '**'
+description: Code Generation Rules - Universal Laws for Production Code
+priority: critical
+enforceStrict: true
+created: '2025-10-07'
+---
 
-**Core Principle:** PRECISION OVER SPEED. VALIDATION OVER ASSUMPTION. COMPLETE OVER PARTIAL.
+# CODE GENERATION RULES (Universal Laws)
 
-## The Problem
-Compilation errors come from:
-- **GUESSING** instead of **READING**
-- **ASSUMING** instead of **VALIDATING**  
-- **IMPROVISING** instead of **PLANNING**
-- **PARTIAL** instead of **COMPLETE** (broken consumers)
+**Root cause of errors:** GUESSING instead of READING. ASSUMING instead of VALIDATING.
 
-## The Solution: 7-Step Process
+Applies to ALL code: UI, business logic, models, tests, APIs, migrations, refactoring.
 
-### STEP 1: SCOPE DEFINITION (30 sec)
-- Write 1-2 sentence task description
-- List success criteria
-- Identify obvious dependencies
-- **Check ripple effect:** Does this change existing code?
+---
 
-### STEP 2: CONSUMER IMPACT ANALYSIS (2-3 min, IF ripple effect)
-```bash
-# Search for all files using what you're changing
-grep -r "OldClassName" src/ | wc -l
+## THE SYSTEMATIC PROCESS
+
+**STEP 1: SCOPE**
+- 1-2 sentence description, success criteria, dependencies
+- Identify ripple effect (does this change existing code?)
+- Create TODO list, mark task in-progress
+
+**STEP 2: CONSUMER IMPACT (IF ripple effect)**
+- Search for ALL consumers: grep -r "ClassName" src/ --include="*.kt"
+- Document: files affected, lines to change, risk level
+- Gate check: Have time to update ALL consumers NOW? If NO → STOP
+
+**STEP 3: DEPENDENCY MAPPING**
+- List ALL classes/interfaces/APIs this code uses
+- Identify file paths
+- Cross-reference with Step 2 findings
+
+**STEP 4: READ & VERIFY NAMING**
+- Read EVERY dependency file completely
+- Document exact names, types, signatures
+- Verify naming compliance (kebab-case files, PascalCase classes, camelCase functions)
+- If violations found → STOP and plan refactor
+
+**STEP 5: INTERFACE MAPPING**
+- Document data flow (ViewModel → Screen → UI)
+- Note type transformations needed
+- Identify mismatches
+
+**STEP 6: GENERATE WITH PRECISION**
+
+Rules:
+- Use ONLY information from Steps 1-5
+- Copy names exactly (no guessing)
+- Apply explicit type conversions
+- **NO HARDCODED DATA, NO SIMULATION**
+- **ADD COMPREHENSIVE COMMENTS**:
+  - KDoc for every function (what, why, data source)
+  - Inline comments explaining data origin
+  - Every StateFlow must note what real data it represents
+  - Every error handler includes ModMainDebug logging
+
+Anti-patterns to NEVER use:
+```kotlin
+❌ fun simulateCardRead() { ... }                    // NO mock/simulate functions
+❌ _status.value = "Available"                       // NO hardcoded values
+❌ _data.value = CardSession(pan="123456...")        // NO fake data
+✅ _status.value = actualDeviceStatus               // YES - real device state
+✅ val reads = emvDatabase.getRecent()              // YES - real database
+✅ ModMainDebug.debugLog(...)                       // YES - logging
 ```
-- Document ALL affected files
-- Estimate update time
-- **Commit:** Must update ALL consumers before task complete
 
-### STEP 3: DEPENDENCY MAPPING (2-5 min)
-- List ALL classes/APIs this code uses
-- Document file paths for each
-
-### STEP 4: DEFINITION READING (5-10 min)
-**READ source files. Don't grep, don't search - READ.**
-- For each class: exact property names, types, nullability
-- For each method: exact signatures, parameters, return types
-- **Document everything** - if it's not written, you'll guess it wrong
-
-### STEP 5: INTERFACE MAPPING (2-3 min)
-- Document data flow between components
-- Note type conversions needed (Long→String, etc.)
-- Identify potential type mismatches
-
-### STEP 6: GENERATION WITH PRECISION (10-30 min)
-**Use ONLY documented information from Steps 3-5**
-- Copy names character-by-character from docs
-- Use exact types
-- Apply explicit conversions
-- No guessing, no "I think it's..."
-
-### STEP 7: VALIDATION (5-10 min)
-**Self-review BEFORE compile:**
-- Compare every property name vs docs
-- Compare every method call vs docs
+**STEP 7: SELF-VALIDATE**
+- Compare every name with Step 4 documentation
 - Verify all type conversions applied
-- Check for guessed names
+- Search for simulate/mock functions → DELETE ALL
+- Check: ALL UI data from real sources? YES? → Proceed
 
-**Then compile:**
+**STEP 7.5: FUNCTIONALITY PRESERVATION (IF code simplified)**
+- What was original functionality?
+- What was removed/changed?
+- Can all original use cases still be performed?
+- If removed: Document TODO for when it returns
+- Gate check: Can't declare complete if functionality lost
+
+**STEP 8: COMPILE**
 ```bash
 ./gradlew compileDebugKotlin
 ```
+Expected: BUILD SUCCESSFUL
 
-**Expected:** BUILD SUCCESSFUL first try
-
-**If ripple effect - Update ALL consumers immediately:**
-- Update imports, calls, state access in ALL affected files
+**STEP 9: UPDATE CONSUMERS (IF ripple effect)**
+- Update ALL identified consumers from Step 2
 - Recompile with consumers
 - Test affected features
-- Remove old code if replaced
-- **Task NOT complete until ALL consumers work**
+- Clean up old code if replaced
 
-### STEP 8: COMMIT AFTER SUCCESS (1-2 min)
-**After BUILD SUCCESSFUL:**
+**STEP 10: CHANGELOG**
+- Add entry at TOP of CHANGELOG.md
+- Format: `[Date] - [Feature/Fix]: Description`
+- Include files changed, scope, breaking changes
+
+**STEP 11: COMMIT**
 ```bash
-git add -A
-git commit -m "feat: [brief description of change]"
+git add .
+git commit -m "[SCOPE] Brief description
+
+- File 1: Change summary
+- File 2: Change summary"
+git push origin master
 ```
 
-**Commit Message Format:**
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `refactor:` - Code restructuring (no behavior change)
-- `perf:` - Performance improvement
-- `docs:` - Documentation only
-- `test:` - Test additions/changes
-- `chore:` - Build/tooling changes
+**STEP 12: REMEMBER MCP**
+- Document in `.github/instructions/memory.instructions.md`
+- Format: `[DATE TIME] - [TASK-NAME]: Completed - Commit: [hash]`
 
-**Examples:**
-```bash
-git commit -m "feat: implement multi-AID EMV processing with isolated tag storage"
-git commit -m "fix: status word stripping to prevent tag overwrites"
-git commit -m "refactor: extract PDOL parsing to separate function"
-```
+---
 
-**Benefits:**
-- Rollback point if next change breaks build
-- Track what actually works
-- Document progress with meaningful commits
-- Git history shows BUILD SUCCESSFUL states only
+## PRE-GENERATION CHECKLIST
 
-## 5 Universal Principles
-
-### 1. EXPLICIT OVER IMPLICIT
-- If API expects String, pass String (not Long hoping for conversion)
-- If method needs non-null, provide non-null (not nullable hoping)
-- Make ALL conversions explicit
-
-### 2. READ BEFORE WRITE
-- Never access property without reading class definition
-- Never call method without reading signature
-- "It should have X" → NO. Read. Verify. Use.
-
-### 3. MAP BEFORE CODE
-- Write plan before generating
-- List ALL dependencies
-- Document ALL names/types/signatures
-- Can't write the map? Not ready to code.
-
-### 4. VALIDATE BEFORE COMMIT
-- Self-review line-by-line
-- Find errors in review (seconds) not compilation (minutes)
-
-### 5. RIPPLE EFFECT (Consumer Impact)
-- Changing provider? MUST update ALL consumers
-- Provider + consumers = ATOMIC operation
-- Half-updated code = broken code
-- Either update everything or update nothing
-
-## Ripple Effect Protocol
-
-**When changing ANY provider (class/API/architecture):**
-
-**BEFORE change:**
-```bash
-# Find ALL consumers
-grep -r "OldClassName" src/
-```
-- Document ALL affected files
-- Plan ALL required updates
-- Estimate time: Provider + Consumers
-
-**AFTER change:**
-1. Update provider ✅
-2. Update ALL consumers immediately ✅
-3. Build with consumers ✅
-4. Test affected features ✅
-5. Delete old code if replaced ✅
-
-**NOT ALLOWED:**
-- "I'll update consumers later"
-- "Let's test provider first"
-- TODOs for consumer updates
-
-**REQUIRED:**
-- Provider + ALL consumers in SAME session
-- BUILD SUCCESSFUL with ALL working
-- No broken code left behind
-
-## Pre-Generation Checklist
-```
-MAPPING:
-□ READ all dependency source files?
-□ DOCUMENTED all properties/methods with exact types?
-□ VERIFIED all signatures I'll call?
-□ Generating with EXACT names (no assumptions)?
-
-RIPPLE EFFECT:
-□ Does this change/replace existing code?
-□ If YES: Searched for ALL consumers?
-□ If YES: Documented ALL required updates?
-□ If YES: Have time to update ALL consumers NOW?
-```
-
-**ANY "NO" → STOP and complete that step**
-
-## Post-Generation Checklist
-```
-PROVIDER:
-□ Code compiles (BUILD SUCCESSFUL)?
-□ Validated all names/types against docs?
-□ All type conversions explicit?
-
-CONSUMERS (if ripple effect):
-□ Updated ALL identified consumers?
-□ Code still compiles with consumers?
-□ Tested affected features?
-□ Removed old code if replaced?
-
-COMPLETION:
-□ ANY broken code left behind? (Must be NO)
-□ ANY TODOs related to this change? (Must be NO)
-□ Task 100% COMPLETE? (Must be YES)
-□ Committed with meaningful message? (Must be YES)
-```
-
-**ANY "NO" → Task INCOMPLETE, keep working**
-
-## The Commitment
+Before writing ANY code:
 
 ```
-I will MAP before I CODE.
-I will READ before I WRITE.
-I will VALIDATE before I COMMIT.
-I will UPDATE CONSUMERS when I change PROVIDERS.
-I will be COMPLETE, not partial.
+0. [ ] Created TODO list, marked task in-progress?
+1. [ ] Defined scope clearly?
+2. [ ] Identified ripple effects?
+3. [ ] Checked naming compliance in existing code?
+4. [ ] READ all dependency files completely?
+5. [ ] DOCUMENTED all names/types/signatures exactly?
+6. [ ] Can I generate this WITHOUT GUESSING anything?
+7. [ ] If ripple effect: Identified ALL consumers?
+8. [ ] If ripple effect: Have time to update ALL NOW?
+9. [ ] Will ALL UI data come from real sources?
+10. [ ] Will I use ZERO hardcoded mock values?
 ```
 
-**Success:** 65 min for COMPLETE working code (provider + consumers), BUILD SUCCESSFUL first try
+If ANY = NO → STOP and complete that step first.
 
-**Failure:** 5+ hours fixing errors, broken consumers, incomplete work
+---
 
-**The math:** Systematic + Complete is faster than Fast + Broken.
+## POST-GENERATION CHECKLIST
+
+Before declaring COMPLETE:
+
 ```
+□ All names verified against documentation
+□ All type conversions applied
+□ NO simulate/mock functions anywhere
+□ Code compiles (BUILD SUCCESSFUL)
+□ All consumers updated (if ripple effect)
+□ Code still compiles with consumers
+□ Features tested
+□ Changes committed with proper message
+□ Changes pushed to remote
+□ Memory updated
+□ No outstanding TODOs for this task
+```
+
+If ANY = NO → Task is INCOMPLETE, keep working.
+
+---
+
+## ENFORCEMENT
+
+**Every compilation error is a process failure.**
+
+When errors occur:
+1. Identify which step failed (Map? Read? Generate? Validate?)
+2. Update process to catch this error earlier
+3. Apply improved process to next task
+4. Goal: Reduce error rate to zero
+
+**Success:** Complete mapping (10 min) → Generation (30 min) → Validation (10 min) → Consumers (15 min) → BUILD SUCCESS (first try)
+
+**Failure:** No mapping → Guess names → Provider works → Consumers broken → 20 errors → Task incomplete
+
+**The math:** Systematic is faster than broken.
+
+---
+
+**Status:** Production Standard  
+**Authority:** Universal Law - NO EXCEPTIONS  
+**Last Updated:** 2025-11-05

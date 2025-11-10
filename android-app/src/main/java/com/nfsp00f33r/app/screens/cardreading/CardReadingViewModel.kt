@@ -26,6 +26,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import com.nfsp00f33r.app.cardreading.EmvTlvParser
+import com.nfsp00f33r.app.cardreading.EmvParseResponse
 import com.nfsp00f33r.app.cardreading.EmvTagDictionary
 import com.nfsp00f33r.app.cardreading.EnrichedTagData
 import com.nfsp00f33r.app.storage.emv.EmvSessionDatabase
@@ -50,6 +51,11 @@ import com.nfsp00f33r.app.emv.CvmProcessor
  * PHASE 1: Multi-AID Processing - Extracts and analyzes ALL AIDs from PPSE
  */
 class CardReadingViewModel(private val context: Context) : ViewModel() {
+    // Advanced settings for EMV (user-configurable, Proxmark-style)
+    var advancedAmount by mutableStateOf("1.00") // Default $1.00
+    var advancedTtq by mutableStateOf("36000000") // Default TTQ (hex)
+    var advancedTransactionType by mutableStateOf(TransactionType.QVSDC) // Default to qVSDC (standard contactless)
+    var advancedCryptoSelect by mutableStateOf("ARQC") // Default to ARQC
     
     /**
      * Data class for AID (Application Identifier) entries from PPSE response
@@ -84,6 +90,8 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         var cardUid: String = "",
         // Complete tag collection from all phases
         val allTags: MutableMap<String, EnrichedTagData> = mutableMapOf(),
+        // Preserve grouped/nested occurrences: tag -> list of (path, EnrichedTagData)
+        val groupedTags: MutableMap<String, MutableList<Pair<String, EnrichedTagData>>> = mutableMapOf(),
         // APDU log entries
         val apduEntries: MutableList<ApduLogEntry> = mutableListOf(),
         // Phase-specific data
@@ -98,12 +106,71 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         var successfulApdus: Int = 0,
         var scanStatus: String = "IN_PROGRESS",
         var errorMessage: String? = null
+        ,
+        // AFL -> READ validation: collect any AFL-listed records that failed to be read
+        val aflReadFailures: MutableList<String> = mutableListOf(),
+        var aflMismatchSummary: String? = null
     )
+
+    /**
+     * Merge an EmvParseResponse into the current session data structures.
+     * - Flatten first-seen tags into allTags (backwards-compatible)
+     * - Preserve grouped/nested occurrences in groupedTags for later analysis
+     */
+    private fun mergeParseResultIntoSession(parseResult: EmvParseResponse) {
+        currentSessionData?.let { session ->
+            // Merge flat tags (first-seen preserved)
+            for ((tag, enriched) in parseResult.tags) {
+                if (!session.allTags.containsKey(tag)) {
+                    session.allTags[tag] = enriched
+                }
+            }
+
+            // Merge grouped occurrences (preserve hierarchical path info)
+            var groupedAdded = 0
+            for ((tag, occurrences) in parseResult.grouped) {
+                val list = session.groupedTags.getOrPut(tag) { mutableListOf() }
+                for ((path, enriched) in occurrences) {
+                    // Avoid duplicate path/value pairs
+                    if (list.none { it.first == path && it.second.value == enriched.value }) {
+                        list.add(Pair(path, enriched))
+                    }
+
+                    // Persist grouped occurrence as a distinct key so nested TLV
+                    // occurrences are not lost when a template tag was stored as
+                    // a flat value. Key format: "TAG@PATH" (e.g. "4F@PPSE/61/4F").
+                    val groupedKey = "$tag@$path"
+                    if (!session.allTags.containsKey(groupedKey)) {
+                        session.allTags[groupedKey] = enriched.copy(path = path)
+                        groupedAdded++
+                    }
+                }
+            }
+
+            Timber.d("mergeParseResultIntoSession: merged ${parseResult.tags.size} flat tags, added $groupedAdded grouped occurrences")
+        }
+    }
     
     // Hardware and reader management - Phase 2B Day 1: Migrated to PN532DeviceModule
     private val pn532Module by lazy {
         NfSp00fApplication.getPN532Module()
     }
+
+    /**
+     * Internal model to represent a failed READ RECORD attempt
+     */
+    private data class FailedReadEntry(
+        val sfi: Int,
+        val record: Int,
+        val p2: Int,
+        val statusWord: String,
+        val statusMeaning: String,
+        val responseHex: String,
+        val timestamp: String
+    )
+
+    // Collect failed reads during an active session (not persisted directly, summarized)
+    private val failedReadRecords: MutableList<FailedReadEntry> = mutableListOf()
     
     // Card data store with encryption (PHASE 7: Will be removed)
     private val cardDataStore by lazy {
@@ -300,11 +367,18 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 apduLog = emptyList()
                 parsedEmvFields = emptyMap()
                 
-                Timber.i("Starting Proxmark3 Iceman EMV workflow for card: $cardId")
-                
-                // Phase 1: PPSE Selection (Proximity Payment System Environment)
-                executeProxmark3EmvWorkflow(tag)
-                
+                Timber.i("[EMV] Starting Proxmark3 Iceman EMV workflow for card: $cardId")
+                try {
+                    // Phase 1: PPSE Selection (Proximity Payment System Environment)
+                    executeProxmark3EmvWorkflow(tag)
+                } catch (e: Exception) {
+                    Timber.e(e, "[EMV] Workflow crashed: ${e.message}")
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "Workflow error: ${e.message}"
+                        scanState = ScanState.ERROR
+                        currentPhase = "Error"
+                    }
+                }
             } catch (e: Exception) {
                 Timber.e(e, "Error processing NFC tag")
                 withContext(Dispatchers.Main) {
@@ -326,7 +400,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      */
     private suspend fun executeProxmark3EmvWorkflow(tag: android.nfc.Tag) {
         val cardId = tag.id.joinToString("") { "%02X".format(it) }
-        
+
         // Initialize session
         currentSessionId = UUID.randomUUID().toString()
         sessionStartTime = System.currentTimeMillis()
@@ -335,65 +409,93 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             scanStartTime = sessionStartTime,
             cardUid = cardId
         )
-        
+
         // Clear previous state
         apduLog = emptyList()
         parsedEmvFields = emptyMap()
+    // Reset per-session failure tracking
+    failedReadRecords.clear()
         EmvTlvParser.clearRocaAnalysisResults()
         rocaVulnerabilityStatus = "Analyzing..."
         isRocaVulnerable = false
-        
-        Timber.i("STARTING CLEAN EMV WORKFLOW - Session $currentSessionId")
-        
+
+        Timber.i("[EMV] STARTING CLEAN EMV WORKFLOW - Session $currentSessionId")
+
         // Connect to card
         val isoDep = android.nfc.tech.IsoDep.get(tag)
         if (isoDep == null) {
+            Timber.e("[EMV] Card does not support ISO-DEP, aborting workflow")
             withContext(Dispatchers.Main) {
                 statusMessage = "Card does not support ISO-DEP"
                 scanState = ScanState.ERROR
             }
             return
         }
-        
+
         isoDep.connect()
-        
+
         try {
-            // Phase 1: PPSE Selection
+            Timber.i("[EMV] Phase 1: PPSE Selection")
             val aidEntries = executePhase1_PpseSelection(isoDep)
             if (aidEntries.isEmpty()) {
-                Timber.w("No AIDs found - aborting workflow")
+                Timber.e("[EMV] No AIDs found in PPSE - workflow will not continue to GPO/GEN AC")
+                withContext(Dispatchers.Main) {
+                    statusMessage = "No AIDs found in PPSE"
+                    scanState = ScanState.ERROR
+                }
                 return
             }
-            
-            // Phase 2: AID Selection
-            val selectedAid = executePhase2_AidSelection(isoDep, aidEntries)
-            if (selectedAid.isEmpty()) {
-                Timber.w("No AID selected successfully - aborting workflow")
-                return
+
+            var anyAidProcessed = false
+            for ((aidIndex, aidEntry) in aidEntries.withIndex()) {
+                Timber.i("[EMV] Processing AID #${aidIndex + 1}: ${aidEntry.aid} (${aidEntry.label})")
+                // Phase 2: SELECT AID
+                Timber.i("[EMV] Phase 2: SELECT AID #${aidIndex + 1}")
+                val selected = executePhase2_AidSelection(isoDep, listOf(aidEntry))
+                if (selected.isEmpty()) {
+                    Timber.e("[EMV] AID #${aidIndex + 1} selection failed, skipping to next.")
+                    continue
+                }
+
+                // Phase 3: GPO
+                Timber.i("[EMV] Phase 3: GPO for AID #${aidIndex + 1}")
+                val afl = executePhase3_Gpo(isoDep)
+
+                // Phase 4: Read Records
+                Timber.i("[EMV] Phase 4: Read Records for AID #${aidIndex + 1}")
+                executePhase4_ReadRecords(isoDep, afl)
+
+                // Phase 5: Generate AC
+                Timber.i("[EMV] Phase 5: Generate AC for AID #${aidIndex + 1}")
+                executePhase5_GenerateAc(isoDep)
+
+                // Phase 6: GET DATA
+                Timber.i("[EMV] Phase 6: GET DATA for AID #${aidIndex + 1}")
+                val logFormat = executePhase6_GetData(isoDep)
+
+                // Phase 7: Transaction Logs
+                Timber.i("[EMV] Phase 7: Transaction Logs for AID #${aidIndex + 1}")
+                executePhase7_TransactionLogs(isoDep, logFormat)
+
+                Timber.i("[EMV] Finished processing AID #${aidIndex + 1}: ${aidEntry.aid}")
+                anyAidProcessed = true
             }
-            
-            // Phase 3: GPO
-            val afl = executePhase3_Gpo(isoDep)
-            
-            // Phase 4: Read Records
-            executePhase4_ReadRecords(isoDep, afl)
-            
-            // Phase 5: Generate AC
-            executePhase5_GenerateAc(isoDep)
-            
-            // Phase 6: GET DATA
-            val logFormat = executePhase6_GetData(isoDep)
-            
-            // Phase 7: Transaction Logs
-            executePhase7_TransactionLogs(isoDep, logFormat)
-            
-            // Finalize Session
-            finalizeSession(cardId, tag)
-            
+
+            if (anyAidProcessed) {
+                Timber.i("[EMV] All AIDs processed, finalizing session.")
+                finalizeSession(cardId, tag)
+            } else {
+                Timber.e("[EMV] No AIDs processed successfully - aborting workflow before GPO/GEN AC.")
+                withContext(Dispatchers.Main) {
+                    statusMessage = "No AIDs processed successfully"
+                    scanState = ScanState.ERROR
+                }
+            }
+
         } catch (e: Exception) {
-            Timber.e(e, "EMV workflow error")
+            Timber.e(e, "[EMV] Workflow error: ${e.message}")
             withContext(Dispatchers.Main) {
-                statusMessage = "Error: ${e.message}"
+                statusMessage = "Workflow error: ${e.message}"
                 scanState = ScanState.ERROR
             }
             currentSessionData?.scanStatus = "ERROR"
@@ -429,14 +531,35 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
         
         val ppseBytes = responseHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        val ppseParseResult = EmvTlvParser.parseResponse(ppseBytes, "PPSE")
-        currentSessionData?.ppseResponse = ppseParseResult.tags
-        currentSessionData?.allTags?.putAll(ppseParseResult.tags)
-        
-        val aidEntries = ppseParseResult.tags.filter { it.key == "4F" }.map { (_, enrichedTag) ->
-            val label = ppseParseResult.tags["50"]?.valueDecoded ?: "Unknown"
-            val priority = ppseParseResult.tags["87"]?.value?.toIntOrNull(16) ?: 0
-            AidEntry(enrichedTag.value, label, priority)
+    val ppseParseResult = EmvTlvParser.parseResponse(ppseBytes, "PPSE")
+    currentSessionData?.ppseResponse = ppseParseResult.tags
+    // Merge flat and grouped parsed results into session
+    mergeParseResultIntoSession(ppseParseResult)
+
+        // Improved: Use grouped occurrences for directory entries so each 61 template's
+        // nested 4F/50/87 are associated together. This avoids taking the first-seen 4F/50
+        // globally which broke mapping when multiple AIDs are present.
+        val aidEntries = mutableListOf<AidEntry>()
+        val dirEntries = ppseParseResult.grouped["61"] ?: emptyList()
+        if (dirEntries.isNotEmpty()) {
+            for ((path, dirTag) in dirEntries) {
+                // For this directory occurrence, search grouped maps for nested tags under same path
+                val nestedAid = ppseParseResult.grouped["4F"]?.firstOrNull { it.first.startsWith(path) }?.second?.value
+                val nestedLabel = ppseParseResult.grouped["50"]?.firstOrNull { it.first.startsWith(path) }?.second?.valueDecoded
+                val nestedPriorityHex = ppseParseResult.grouped["87"]?.firstOrNull { it.first.startsWith(path) }?.second?.value
+                val priority = nestedPriorityHex?.toIntOrNull(16) ?: 0
+
+                if (!nestedAid.isNullOrEmpty()) {
+                    aidEntries.add(AidEntry(nestedAid, nestedLabel ?: "Unknown", priority))
+                }
+            }
+        } else {
+            // Fallback: if grouping not present, fall back to previous flat extraction
+            for ((tag, enrichedTag) in ppseParseResult.tags.filter { it.key == "4F" }) {
+                val label = ppseParseResult.tags["50"]?.valueDecoded ?: "Unknown"
+                val priority = ppseParseResult.tags["87"]?.value?.toIntOrNull(16) ?: 0
+                aidEntries.add(AidEntry(enrichedTag.value, label, priority))
+            }
         }
         
         Timber.i("PPSE: ${aidEntries.size} AIDs found")
@@ -484,7 +607,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 val aidBytes = aidHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                 val aidParseResult = EmvTlvParser.parseResponse(aidBytes, "SELECT_AID", aidEntry.label)
                 currentSessionData?.aidResponses?.add(aidParseResult.tags)
-                currentSessionData?.allTags?.putAll(aidParseResult.tags)
+                mergeParseResultIntoSession(aidParseResult)
                 
                 if (selectedAid.isEmpty()) selectedAid = aidEntry.aid
                 Timber.i("✅ AID #${aidIndex + 1} selected: ${aidEntry.label}")
@@ -523,7 +646,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             val gpoBytes = gpoHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             val gpoParseResult = EmvTlvParser.parseResponse(gpoBytes, "GPO")
             currentSessionData?.gpoResponse = gpoParseResult.tags
-            currentSessionData?.allTags?.putAll(gpoParseResult.tags)
+            mergeParseResultIntoSession(gpoParseResult)
             
             afl = gpoParseResult.tags["94"]?.value ?: ""
             val aip = gpoParseResult.tags["82"]?.value ?: ""
@@ -577,18 +700,98 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 "READ RECORD SFI $sfi Rec $record",
                 0L
             )
-            
-            if (statusWord == "9000") {
+
+            // If read failed, attempt a limited retry strategy for transient or card-side quirks
+            val retriableSw = setOf("6A83", "6900", "6A82", "6B00", "6F00")
+            var finalStatusWord = statusWord
+            var finalReadHex = readHex
+            if (statusWord != "9000" && statusWord in retriableSw) {
+                // Try up to 2 retries with a reselect of current AID between attempts if available
+                val selectedAidHex = currentSessionData?.aidResponses?.lastOrNull()?.get("4F")?.value
+                for (attempt in 1..2) {
+                    try {
+                        // Small delay between attempts
+                        kotlinx.coroutines.delay(150L * attempt)
+
+                        if (!selectedAidHex.isNullOrEmpty()) {
+                            // Re-select AID to ensure card context is correct
+                            val aidBytes = selectedAidHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                            val aidSelectCmd = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aidBytes.size.toByte()) + aidBytes + byteArrayOf(0x00)
+                            val selResp = isoDep.transceive(aidSelectCmd)
+                            val selHex = selResp.joinToString("") { "%02X".format(it) }
+                            val selSw = if (selHex.length >= 4) selHex.takeLast(4) else "UNKNOWN"
+                            addApduLogEntry(
+                                aidSelectCmd.joinToString("") { "%02X".format(it) },
+                                selHex,
+                                selSw,
+                                "RESELECT AID (retry #$attempt)",
+                                0L
+                            )
+                        }
+
+                        // Retry the READ RECORD
+                        val retryResp = isoDep.transceive(readCommand)
+                        finalReadHex = retryResp.joinToString("") { "%02X".format(it) }
+                        finalStatusWord = if (finalReadHex.length >= 4) finalReadHex.takeLast(4) else "UNKNOWN"
+                        addApduLogEntry(
+                            "00B2" + String.format("%02X%02X", record, p2) + "00",
+                            finalReadHex,
+                            finalStatusWord,
+                            "READ RECORD SFI $sfi Rec $record (retry #$attempt)",
+                            0L
+                        )
+
+                        if (finalStatusWord == "9000") break
+                    } catch (e: Exception) {
+                        Timber.w(e, "Retry failed for SFI $sfi Rec $record on attempt $attempt")
+                    }
+                }
+            }
+
+            if (finalStatusWord == "9000") {
                 val readBytes = readHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                 val recordParseResult = EmvTlvParser.parseResponse(readBytes, "READ_RECORD", "SFI$sfi-REC$record")
                 currentSessionData?.recordResponses?.add(recordParseResult.tags)
-                currentSessionData?.allTags?.putAll(recordParseResult.tags)
-                
-                val detailedData = recordParseResult.tags.mapNotNull { (tag, enriched) ->
-                    enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
-                }.toMap()
+                // Merge flat and grouped parsed results into session storage
+                mergeParseResultIntoSession(recordParseResult)
+
+                // Prefer grouped (nested) occurrences when forming parsed fields
+                val detailedData = mutableMapOf<String, String>()
+                if (recordParseResult.grouped.isNotEmpty()) {
+                    for ((tag, occurrences) in recordParseResult.grouped) {
+                        // Choose most-nested occurrence (longest path depth)
+                        val chosen = occurrences.maxByOrNull { it.first.count { ch -> ch == '/' } } ?: occurrences.first()
+                        val key = recordParseResult.tags[tag]?.name?.lowercase()?.replace(" ", "_")
+                            ?: EmvTagDictionary.getTagDescription(tag).lowercase().replace(" ", "_")
+                        val value = chosen.second.valueDecoded ?: chosen.second.value
+                        detailedData[key] = value
+                    }
+                } else {
+                    // Fallback to flat tags map
+                    detailedData.putAll(recordParseResult.tags.mapNotNull { (tag, enriched) ->
+                        enriched.name.lowercase().replace(" ", "_") to (enriched.valueDecoded ?: enriched.value)
+                    }.toMap())
+                }
                 parsedEmvFields = parsedEmvFields + detailedData
+            } else {
+                // Record failed - track it for AFL vs READ cross-check
+                val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date())
+                val statusMeaning = interpretStatusWord(finalStatusWord)
+                failedReadRecords.add(FailedReadEntry(sfi, record, p2, finalStatusWord, statusMeaning, finalReadHex, timestamp))
+                currentSessionData?.aflReadFailures?.add("SFI $sfi Rec $record SW=$finalStatusWord ($statusMeaning)")
             }
+        }
+
+        // After attempting all reads, build AFL mismatch summary for session
+        if (failedReadRecords.isNotEmpty()) {
+            val grouped = failedReadRecords.groupBy { it.sfi }
+            val summaryParts = grouped.map { (sfi, entries) ->
+                val recList = entries.joinToString(",") { "${it.record}(SW=${it.statusWord})" }
+                "SFI $sfi: $recList"
+            }
+            val summary = "AFL-READ MISMATCHES -> ${summaryParts.size} SFI(s): ${summaryParts.joinToString("; ")}" 
+            currentSessionData?.aflMismatchSummary = summary
+            Timber.w("PHASE 4: $summary")
         }
     }
     
@@ -665,7 +868,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             val generateAcBytes = generateAcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             val cryptogramParseResult = EmvTlvParser.parseResponse(generateAcBytes, "GENERATE_AC")
             currentSessionData?.cryptogramResponse = cryptogramParseResult.tags
-            currentSessionData?.allTags?.putAll(cryptogramParseResult.tags)
+            mergeParseResultIntoSession(cryptogramParseResult)
             
             val cryptogram = cryptogramParseResult.tags["9F26"]?.value ?: ""
             val cid = cryptogramParseResult.tags["9F27"]?.value ?: ""
@@ -748,7 +951,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             if (statusWord == "9000") {
                 val generateAc2Bytes = generateAc2Hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                 val ac2ParseResult = EmvTlvParser.parseResponse(generateAc2Bytes, "GENERATE_AC2")
-                currentSessionData?.allTags?.putAll(ac2ParseResult.tags)
+                mergeParseResultIntoSession(ac2ParseResult)
                 
                 val tc = ac2ParseResult.tags["9F26"]?.value ?: ""
                 Timber.i("✅ GENERATE AC2 Success: TC=$tc (Transaction approved)")
@@ -790,13 +993,14 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 
                 val getDataBytes = getDataHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                 val getDataParseResult = EmvTlvParser.parseResponse(getDataBytes, "GET_DATA", tag)
-                
+                // Merge flat and grouped parsed results
+                mergeParseResultIntoSession(getDataParseResult)
+
                 if (currentSessionData?.getDataResponse == null) {
                     currentSessionData?.getDataResponse = getDataParseResult.tags
                 } else {
                     currentSessionData?.getDataResponse = currentSessionData?.getDataResponse!! + getDataParseResult.tags
                 }
-                currentSessionData?.allTags?.putAll(getDataParseResult.tags)
                 
                 if (tag == "9F4F") {
                     logFormatValue = getDataParseResult.tags["9F4F"]?.value ?: ""
@@ -840,7 +1044,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                             val logBytes = logReadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                             val logParseResult = EmvTlvParser.parseResponse(logBytes, "TRANSACTION_LOG", "LOG$recordNum")
                             currentSessionData?.recordResponses?.add(logParseResult.tags)
-                            currentSessionData?.allTags?.putAll(logParseResult.tags)
+                            mergeParseResultIntoSession(logParseResult)
                         } else if (logStatusWord == "6A83") {
                             break
                         }
@@ -887,6 +1091,59 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
         
         Timber.i("SESSION FINALIZED - ${apduLog.size} APDUs, ${extractedData.emvTags.size} tags")
+    }
+
+    /**
+     * Reconcile AFL entries from the GPO response with APDU log entries and
+     * return a concise summary plus detailed failures. Useful for post-hoc
+     * analysis when reviewing saved sessions or exported logs.
+     */
+    fun generateAflMismatchReport(session: SessionScanData? = currentSessionData): Pair<String, List<String>>? {
+        val s = session ?: return null
+        val aflHex = s.gpoResponse?.get("94")?.value ?: s.aidResponses.firstOrNull { it.containsKey("94") }?.get("94")?.value
+            ?: return null
+
+        val expected = mutableSetOf<Pair<Int, Int>>()
+        EmvTlvParser.parseAfl(aflHex).forEach { entry ->
+            for (r in entry.startRecord..entry.endRecord) expected.add(Pair(entry.sfi, r))
+        }
+
+        // Build map of attempts from APDU log (command string like 00B2RRPP00)
+        val attempts = mutableMapOf<Pair<Int, Int>, MutableList<com.nfsp00f33r.app.data.ApduLogEntry>>()
+        for (apdu in s.apduEntries) {
+            val cmd = apdu.command.replace(" ", "")
+            if (cmd.startsWith("00B2")) {
+                try {
+                    val recHex = cmd.substring(4, 6)
+                    val p2Hex = cmd.substring(6, 8)
+                    val rec = recHex.toInt(16)
+                    val p2 = p2Hex.toInt(16)
+                    val sfi = (p2 shr 3) and 0x1F
+                    val key = Pair(sfi, rec)
+                    attempts.getOrPut(key) { mutableListOf() }.add(apdu)
+                } catch (e: Exception) {
+                    // ignore malformed
+                }
+            }
+        }
+
+        val failures = mutableListOf<String>()
+        // Check expected vs attempts
+        for (e in expected) {
+            val attempted = attempts[e]
+            if (attempted == null || attempted.isEmpty()) {
+                failures.add("NOT ATTEMPTED: SFI ${e.first} Rec ${e.second}")
+            } else {
+                // check last attempt status
+                val last = attempted.last()
+                if (!last.statusWord.equals("9000", ignoreCase = true)) {
+                    failures.add("FAILED: SFI ${e.first} Rec ${e.second} SW=${last.statusWord} (${interpretStatusWord(last.statusWord)})")
+                }
+            }
+        }
+
+        val summary = if (failures.isEmpty()) "AFL vs READ: All expected records read successfully" else "AFL vs READ: ${failures.size} issues detected"
+        return Pair(summary, failures)
     }
     
     
@@ -1098,37 +1355,50 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      */
     private fun buildPdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
         val dataList = mutableListOf<Byte>()
-        
-        // Build terminal data map with current transaction parameters
-        val terminalDataMap = transactionParamManager.buildTerminalDataMap(
-            transactionType = selectedTransactionType,
-            amountAuthorised = transactionAmountCents,
-            amountOther = 0L,
-            transactionTypeCode = TransactionParameterManager.TransactionTypeCode.GOODS_AND_SERVICES
-        )
-        
         Timber.d("🔨 Building PDOL data for ${dolEntries.size} entries (Type: ${selectedTransactionType.label})")
-        
         for (entry in dolEntries) {
-            val tagData = transactionParamManager.getTerminalData(
-                tag = entry.tag,
-                length = entry.length,
-                transactionType = selectedTransactionType
-            )
-            
-            // Log each PDOL tag for debugging
-            val tagHex = tagData.joinToString("") { "%02X".format(it) }
-            val tagName = EmvTagDictionary.getTagDescription(entry.tag)
-            Timber.d("  PDOL: ${entry.tag} ($tagName) = $tagHex")
-            
+            val tag = entry.tag.uppercase()
+            val tagName = EmvTagDictionary.getTagDescription(tag)
+            val tagData: ByteArray = when (tag) {
+                "9F02" -> { // Amount, Authorised (Numeric)
+                    val userValue = advancedAmount.trim().replace(".", "").padStart(entry.length * 2, '0')
+                    val bytes = userValue.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    Timber.d("  PDOL: 9F02 (Amount) = $userValue [user: ${advancedAmount}]")
+                    if (bytes.size == entry.length) bytes else ByteArray(entry.length) { 0x00 }
+                }
+                "9F66" -> { // TTQ
+                    val userValue = advancedTtq.trim().padStart(entry.length * 2, '0')
+                    val bytes = userValue.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    Timber.d("  PDOL: 9F66 (TTQ) = $userValue [user: ${advancedTtq}]")
+                    if (bytes.size == entry.length) bytes else ByteArray(entry.length) { 0x00 }
+                }
+                "9C" -> { // Transaction Type
+                    // EMV 9C: 0x00 = goods/services, 0x20 = cash, 0x40 = cheque, 0x60 = service, 0x80 = cashback, etc.
+                    // For most contactless, 0x00 (goods/services) is standard
+                    val typeByte = when (advancedTransactionType) {
+                        TransactionType.QVSDC, TransactionType.VSDC, TransactionType.MSD, TransactionType.CDA -> 0x00.toByte()
+                        else -> 0x00.toByte()
+                    }
+                    Timber.d("  PDOL: 9C (Transaction Type) = %02X [user: ${advancedTransactionType.label}]", typeByte)
+                    ByteArray(entry.length) { typeByte }
+                }
+                else -> {
+                    val data = transactionParamManager.getTerminalData(
+                        tag = tag,
+                        length = entry.length,
+                        transactionType = selectedTransactionType
+                    )
+                    val dataHex = data.joinToString("") { "%02X".format(it) }
+                    Timber.d("  PDOL: $tag ($tagName) = $dataHex [default]")
+                    data
+                }
+            }
             dataList.addAll(tagData.toList())
         }
-        
         // Build final PDOL data: 83 [length] [data...]
         val totalLength = dataList.size
         val result = byteArrayOf(0x83.toByte(), totalLength.toByte()) + dataList.toByteArray()
-        
-        Timber.i("✅ Built PDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes, TTQ=${selectedTransactionType.ttqByte1})")
+        Timber.i("✅ Built PDOL data: ${result.joinToString("") { "%02X".format(it) }} (${totalLength} bytes, TTQ=${advancedTtq})")
         return result
     }
     
@@ -1141,34 +1411,23 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      */
     private fun buildCdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
         val dataList = mutableListOf<Byte>()
-        
-        // Build terminal data map with current transaction parameters
-        val terminalDataMap = transactionParamManager.buildTerminalDataMap(
-            transactionType = selectedTransactionType,
-            amountAuthorised = transactionAmountCents,
-            amountOther = 0L,
-            transactionTypeCode = TransactionParameterManager.TransactionTypeCode.GOODS_AND_SERVICES
-        )
-        
         Timber.d("🔨 Building CDOL data for ${dolEntries.size} entries (Decision: ${selectedTerminalDecision.label})")
-        
         for (entry in dolEntries) {
-            val tagData = when (entry.tag.uppercase()) {
-                "9F36" -> {
-                    // ATC (Application Transaction Counter) - extract from previous responses
+            val tag = entry.tag.uppercase()
+            val tagName = EmvTagDictionary.getTagDescription(tag)
+            val tagData: ByteArray = when (tag) {
+                "9F36" -> { // ATC
                     val atcHex = extractAtcFromAllResponses(apduLog)
                     if (atcHex.isNotEmpty()) {
                         val atcBytes = atcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                         Timber.d("  CDOL: 9F36 (ATC) = $atcHex [from card]")
-                        if (atcBytes.size == entry.length) atcBytes
-                        else atcBytes + ByteArray(entry.length - atcBytes.size) { 0x00 }
+                        if (atcBytes.size == entry.length) atcBytes else atcBytes + ByteArray(entry.length - atcBytes.size) { 0x00 }
                     } else {
                         Timber.w("  CDOL: 9F36 (ATC) not found, using zeros")
                         ByteArray(entry.length) { 0x00 }
                     }
                 }
-                "9F10" -> {
-                    // Issuer Application Data - extract from previous responses
+                "9F10" -> { // IAD
                     val iadHex = extractIadFromAllResponses(apduLog)
                     if (iadHex.isNotEmpty()) {
                         val iadBytes = iadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
@@ -1183,23 +1442,40 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                         ByteArray(entry.length) { 0x00 }
                     }
                 }
+                "9F02" -> { // Amount, Authorised (Numeric)
+                    val userValue = advancedAmount.trim().replace(".", "").padStart(entry.length * 2, '0')
+                    val bytes = userValue.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    Timber.d("  CDOL: 9F02 (Amount) = $userValue [user: ${advancedAmount}]")
+                    if (bytes.size == entry.length) bytes else ByteArray(entry.length) { 0x00 }
+                }
+                "9F66" -> { // TTQ
+                    val userValue = advancedTtq.trim().padStart(entry.length * 2, '0')
+                    val bytes = userValue.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    Timber.d("  CDOL: 9F66 (TTQ) = $userValue [user: ${advancedTtq}]")
+                    if (bytes.size == entry.length) bytes else ByteArray(entry.length) { 0x00 }
+                }
+                "9C" -> { // Transaction Type
+                    val typeByte = when (advancedTransactionType) {
+                        TransactionType.QVSDC, TransactionType.VSDC, TransactionType.MSD, TransactionType.CDA -> 0x00.toByte()
+                        else -> 0x00.toByte()
+                    }
+                    Timber.d("  CDOL: 9C (Transaction Type) = %02X [user: ${advancedTransactionType.label}]", typeByte)
+                    ByteArray(entry.length) { typeByte }
+                }
                 else -> {
-                    // Use terminal parameter manager for all other tags
+                    // Fallback to terminal param manager or zeroes
                     val data = transactionParamManager.getTerminalData(
-                        tag = entry.tag,
+                        tag = tag,
                         length = entry.length,
                         transactionType = selectedTransactionType
                     )
-                    val tagName = EmvTagDictionary.getTagDescription(entry.tag)
                     val dataHex = data.joinToString("") { "%02X".format(it) }
-                    Timber.d("  CDOL: ${entry.tag} ($tagName) = $dataHex [from terminal]")
+                    Timber.d("  CDOL: $tag ($tagName) = $dataHex [default]")
                     data
                 }
             }
-            
             dataList.addAll(tagData.toList())
         }
-        
         val result = dataList.toByteArray()
         Timber.i("✅ Built CDOL data: ${result.joinToString("") { "%02X".format(it) }} (${result.size} bytes)")
         return result
@@ -2032,6 +2308,18 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 // Add all found tags to the map (later entries overwrite earlier ones)
                 val previousTag90 = tags["90"]
                 tags.putAll(parseResult.tags)
+
+                // Also persist grouped/nested occurrences as unique keys so their
+                // nested origins are not lost when templates are stored as values.
+                // Key format: "TAG@PATH" (e.g. "50@PPSE/61/50").
+                for ((gTag, occurrences) in parseResult.groupedTags) {
+                    for ((gPath, gHex) in occurrences) {
+                        val groupedKey = "$gTag@$gPath"
+                        if (!tags.containsKey(groupedKey)) {
+                            tags[groupedKey] = gHex
+                        }
+                    }
+                }
                 
                 // Log if tag 90 was overwritten
                 if (previousTag90 != null && parseResult.tags.containsKey("90")) {
@@ -2592,33 +2880,39 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             val scanDuration = System.currentTimeMillis() - sessionStartTime
             sessionData.scanStatus = "COMPLETED"
             
-            // Extract key fields from all collected tags
+            // Extract key fields from all collected tags (fall back to grouped occurrences)
             val allTags = sessionData.allTags
-            val pan = allTags["5A"]?.value ?: ""
+
+            fun findEnriched(tagKey: String): EnrichedTagData? {
+                allTags[tagKey]?.let { return it }
+                return allTags.entries.firstOrNull { it.key.startsWith("$tagKey@") }?.value
+            }
+
+            val pan = findEnriched("5A")?.value ?: ""
             val maskedPan = if (pan.length > 10) "${pan.take(6)}****${pan.takeLast(4)}" else pan
-            val expiryDate = allTags["5F24"]?.valueDecoded
-            val cardholderName = allTags["5F20"]?.valueDecoded
-            val cardBrand = allTags["50"]?.valueDecoded ?: "Unknown"
-            val appLabel = allTags["50"]?.valueDecoded
-            val appId = allTags["4F"]?.value
-            val aip = allTags["82"]?.value
-            val arqc = allTags["9F26"]?.value
-            val tc = allTags["9F61"]?.value
-            val cid = allTags["9F27"]?.value
-            val atc = allTags["9F36"]?.value
-            
+            val expiryDate = findEnriched("5F24")?.valueDecoded
+            val cardholderName = findEnriched("5F20")?.valueDecoded
+            val cardBrand = findEnriched("50")?.valueDecoded ?: "Unknown"
+            val appLabel = findEnriched("50")?.valueDecoded
+            val appId = findEnriched("4F")?.value
+            val aip = findEnriched("82")?.value
+            val arqc = findEnriched("9F26")?.value
+            val tc = findEnriched("9F61")?.value
+            val cid = findEnriched("9F27")?.value
+            val atc = findEnriched("9F36")?.value
+
             // Parse AIP for capabilities
             val hasSda = aip?.let { EmvTlvParser.parseAip(it)?.sdaSupported } ?: false
             val hasDda = aip?.let { EmvTlvParser.parseAip(it)?.ddaSupported } ?: false
             val hasCda = aip?.let { EmvTlvParser.parseAip(it)?.cdaSupported } ?: false
             val supportsCvm = aip?.let { EmvTlvParser.parseAip(it)?.cardholderVerificationSupported } ?: false
-            
+
             // Check ROCA vulnerability (from existing ViewModel state)
             val rocaVulnerable = isRocaVulnerable
             val rocaKeyModulus = if (rocaVulnerable) allTags.values.firstOrNull { it.name.contains("Modulus", ignoreCase = true) }?.value else null
-            
+
             // Build entity
-            val entity = com.nfsp00f33r.app.storage.emv.EmvCardSessionEntity(
+                val entity = com.nfsp00f33r.app.storage.emv.EmvCardSessionEntity(
                 sessionId = sessionData.sessionId,
                 scanTimestamp = sessionData.scanStartTime,
                 scanDuration = scanDuration,
@@ -2643,7 +2937,9 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 atc = atc,
                 rocaVulnerable = rocaVulnerable,
                 rocaKeyModulus = rocaKeyModulus,
-                hasEncryptedData = allTags.any { it.key in listOf("86", "9F26", "9F27") },
+                hasEncryptedData = listOf("86", "9F26", "9F27").any { key ->
+                    allTags.containsKey(key) || allTags.keys.any { it.startsWith("$key@") }
+                },
                 allEmvTags = allTags,
                 apduLog = sessionData.apduEntries.map { apdu ->
                     com.nfsp00f33r.app.storage.emv.ApduLogEntry(
@@ -2665,13 +2961,21 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 cryptogramData = null,
                 totalApdus = sessionData.totalApdus,
                 totalTags = allTags.size,
-                recordCount = sessionData.recordResponses.size
+                recordCount = sessionData.recordResponses.size,
+                aflMismatchSummary = sessionData.aflMismatchSummary,
+                aflReadFailures = sessionData.aflReadFailures
             )
             
             // Insert into database
             withContext(Dispatchers.IO) {
                 emvSessionDao.insert(entity)
                 Timber.i("PHASE 3E: Session ${sessionData.sessionId} saved to Room database")
+                if (!sessionData.aflMismatchSummary.isNullOrEmpty()) {
+                    Timber.w("PHASE 3E: AFL mismatch summary: ${sessionData.aflMismatchSummary}")
+                    if (sessionData.aflReadFailures.isNotEmpty()) {
+                        Timber.w("PHASE 3E: AFL failed reads: ${sessionData.aflReadFailures.joinToString("; ")}")
+                    }
+                }
                 Timber.i("  - ${allTags.size} total tags (merged from all AIDs)")
                 Timber.i("  - ${entity.aidsData.size} AIDs processed:")
                 entity.aidsData.forEachIndexed { index, aidData ->

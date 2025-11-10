@@ -394,7 +394,9 @@ class DatabaseViewModel(private val context: Context) : ViewModel() {
                             cryptogramData = null,
                             totalApdus = 0,
                             totalTags = 0,
-                            recordCount = 0
+                            recordCount = 0,
+                            aflMismatchSummary = null,
+                            aflReadFailures = emptyList()
                         )
                         
                         emvSessionDao.insert(entity)

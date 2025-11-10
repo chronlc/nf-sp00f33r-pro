@@ -30,10 +30,11 @@ object EmvTlvParser {
     // Based on ChAP.py Python script: tags marked as TEMPLATE (type 0) contain nested TLV data
     // These MUST be recursively parsed, not treated as flat data
     private val TEMPLATE_TAGS = setOf(
-        "6F",   // FCI Template - BINARY TEMPLATE (contains 84, A5, etc.)
-        "70",   // Record Template - BINARY TEMPLATE (contains card data tags)
+    "6F",   // FCI Template - BINARY TEMPLATE (contains 84, A5, etc.)
+    "70",   // Record Template - BINARY TEMPLATE (contains card data tags)
         "A5",   // FCI Proprietary Template - BINARY TEMPLATE (contains 50, 87, 5F2D, BF0C, etc.)
         "61",   // Application Template - TEMPLATE (contains 4F, 50, 87, 73)
+    "77",   // Response Message Template Format 2 - contains nested tags like 82, 94, 9Fxx
         "73",   // Directory Discretionary Template - TEMPLATE
         "BF0C"  // FCI Issuer Discretionary Data - BER_TLV TEMPLATE (contains many nested tags)
         // NOTE: 0x77 and 0x80 have "Template" in their names but are ITEMS per ChAP.py - they contain cryptographic data, not nested TLV
@@ -44,7 +45,7 @@ object EmvTlvParser {
     // These are EMV spec quirks where the tag encoding doesn't match the data structure
     // Based on ChAP.py reference: tags marked as ITEM are primitive, TEMPLATE are constructed
     private val ALWAYS_PRIMITIVE_TAGS = setOf(
-        "77",  // Response Message Template Format 2 - BINARY ITEM - Contains cryptographic response data, NOT nested TLV
+    // Note: 77 (Response Message Template Format 2) can contain nested TLV tags (82,94,9Fxx). Do NOT treat as always-primitive.
         "80",  // Response Message Template Format 1 - BINARY ITEM - Contains cryptographic response data, NOT nested TLV
         "82",  // Application Interchange Profile (AIP) - BINARY ITEM - 2-byte bitmask, NOT a template
         "84",  // DF Name - MIXED ITEM - Contains AID/DF Name directly, NOT nested tags
@@ -81,6 +82,8 @@ object EmvTlvParser {
      */
     data class TlvParseResult(
         val tags: Map<String, String>,
+        // Map of tag -> list of (path, valueHex) representing every occurrence with its nested path
+        val groupedTags: Map<String, List<Pair<String, String>>> = emptyMap(),
         val errors: List<String> = emptyList(),
         val warnings: List<String> = emptyList(),
         val validTags: Int = 0,
@@ -103,7 +106,10 @@ object EmvTlvParser {
         var invalidTags = 0
         var maxDepth = 0
         
-        try {
+    // grouped collects all occurrences of tags along with their nested path
+    val grouped = mutableMapOf<String, MutableList<Pair<String, String>>>()
+
+    try {
             // CRITICAL FIX: Remove status word (last 2 bytes: 9000, 6XXX, etc.) before parsing
             // Status word is NOT TLV data and was being parsed as empty tag 90, overwriting real data
             val dataWithoutStatus = if (data.size >= 2) {
@@ -124,11 +130,21 @@ object EmvTlvParser {
             
             Timber.d("$TAG 🔍 Parsing $context data: ${bytesToHex(dataWithoutStatus)} (${dataWithoutStatus.size} bytes)")
             
-            val result = parseTlvRecursive(
-                dataWithoutStatus, 0, dataWithoutStatus.size, tags, context, 0, 
-                errors, warnings, validateTags
-            )
             
+            val result = parseTlvRecursive(
+                dataWithoutStatus,
+                0,
+                dataWithoutStatus.size,
+                tags,
+                context,
+                0,
+                errors,
+                warnings,
+                validateTags,
+                grouped,
+                "" // initial path prefix
+            )
+
             validTags = result.first
             invalidTags = result.second
             maxDepth = result.third
@@ -143,6 +159,7 @@ object EmvTlvParser {
         
         return TlvParseResult(
             tags = tags.toMap(),
+            groupedTags = grouped.entries.associate { entry -> entry.key to entry.value.toList() },
             errors = errors.toList(),
             warnings = warnings.toList(),
             validTags = validTags,
@@ -164,7 +181,9 @@ object EmvTlvParser {
         depth: Int,
         errors: MutableList<String>,
         warnings: MutableList<String>,
-        validateTags: Boolean
+        validateTags: Boolean,
+        grouped: MutableMap<String, MutableList<Pair<String, String>>>,
+        pathPrefix: String
     ): Triple<Int, Int, Int> {
         var offset = start
         val indent = "  ".repeat(depth)
@@ -221,6 +240,9 @@ object EmvTlvParser {
                     break
                 }
                 
+                // Build hierarchical path for this tag occurrence
+                val path = if (pathPrefix.isEmpty()) tagHex else "$pathPrefix/$tagHex"
+
                 // Get tag description and validate
                 val tagDescription = if (validateTags) {
                     EmvTagDictionary.getTagDescription(tagHex)
@@ -249,38 +271,59 @@ object EmvTlvParser {
                         true
                     } else {
                         // For tags with constructed bit (but not in known list),
-                        // verify data looks like valid TLV (peek at first bytes)
-                        val nextByte = data[offset].toInt() and 0xFF
-                        // Valid tag byte: should be in range 0x01-0xFF (not 0x00)
-                        // and should look like a tag (class bits check)
-                        nextByte != 0x00 && nextByte != 0xFF
+                        // verify data looks like valid TLV by attempting to parse a nested tag/length pair
+                        val nestedLooksLikeTlv = try {
+                            val nestedTagResult = parseTagAtOffset(data, offset, offset + length)
+                            if (nestedTagResult == null) {
+                                false
+                            } else {
+                                val (_, nestedTagSize) = nestedTagResult
+                                val nestedLengthResult = parseLengthAtOffset(data, offset + nestedTagSize, offset + length)
+                                nestedLengthResult != null
+                            }
+                        } catch (e: Exception) {
+                            false
+                        }
+
+                        nestedLooksLikeTlv
                     }
                 } else false
                 
                 if (shouldParseAsTemplate && length > 0) {
                     // Parse nested template (contains other TLV tags)
                     Timber.d("$TAG $indent� $context: $tagHex ($tagDescription) - TEMPLATE [${length} bytes] -> parsing nested tags")
-                    
                     val nestedResult = parseTlvRecursive(
-                        data, offset, offset + length, tags, 
-                        "$context/$tagHex", depth + 1, 
-                        errors, warnings, validateTags
+                        data,
+                        offset,
+                        offset + length,
+                        tags,
+                        "$context/$tagHex",
+                        depth + 1,
+                        errors,
+                        warnings,
+                        validateTags,
+                        grouped,
+                        path // pass current path as prefix for nested tags
                     )
                     
                     validCount += nestedResult.first
                     invalidCount += nestedResult.second
                     maxDepth = maxOf(maxDepth, nestedResult.third)
                     
-                    // Also store the raw template data for reference
+                    // Also store the raw template data for reference and record occurrence
                     val templateValue = data.copyOfRange(offset, offset + length)
-                    tags[tagHex] = bytesToHex(templateValue)
+                    // For backward compatibility keep the first-seen value in flat tags map
+                    tags.putIfAbsent(tagHex, bytesToHex(templateValue))
+                    grouped.getOrPut(tagHex) { mutableListOf() }.add(Pair(path, bytesToHex(templateValue)))
                     
                 } else if (length > 0) {
                     // Extract primitive value (regular data tag)
                     val value = data.copyOfRange(offset, offset + length)
                     val valueHex = bytesToHex(value)
-                    
-                    tags[tagHex] = valueHex
+                    // Store first occurrence in flat tags map (preserve prior behavior)
+                    tags.putIfAbsent(tagHex, valueHex)
+                    // Record every occurrence with its hierarchical path
+                    grouped.getOrPut(tagHex) { mutableListOf() }.add(Pair(path, valueHex))
                     Timber.d("$TAG $indent🏷️ $context: $tagHex ($tagDescription) - DATA [${length} bytes] = ${valueHex.take(32)}${if (valueHex.length > 32) "..." else ""}")
                     
                     // Log critical tags specifically
@@ -299,7 +342,8 @@ object EmvTlvParser {
                     
                 } else {
                     // Zero length tag
-                    tags[tagHex] = ""
+                    tags.putIfAbsent(tagHex, "")
+                    grouped.getOrPut(tagHex) { mutableListOf() }.add(Pair(path, ""))
                     Timber.d("$TAG $indent🏷️ $context: $tagHex ($tagDescription) = [EMPTY]")
                 }
                 
@@ -956,10 +1000,15 @@ object EmvTlvParser {
         val result = parseEmvTlvData(response, phase, validateTags = true)
         val enrichedTags = mutableMapOf<String, EnrichedTagData>()
         
+        // Flatten first-seen tags into enrichedTags (backward compatibility)
         for ((tag, hexValue) in result.tags) {
             val tagName = EmvTagDictionary.getTagDescription(tag)
             val decoded = decodeTagValue(tag, hexValue)
-            
+
+            // If grouped occurrences exist for this tag, prefer the first occurrence's
+            // hierarchical path to help callers disambiguate the origin.
+            val firstPath = result.groupedTags[tag]?.firstOrNull()?.first
+
             enrichedTags[tag] = EnrichedTagData(
                 tag = tag,
                 name = tagName,
@@ -967,11 +1016,23 @@ object EmvTlvParser {
                 valueDecoded = decoded,
                 phase = phase,
                 source = source,
-                length = hexValue.length / 2
+                length = hexValue.length / 2,
+                path = firstPath
             )
         }
-        
-        return EmvParseResponse(tags = enrichedTags)
+
+        // Also expose grouped occurrences (path -> value) in a separate map
+        // so callers can disambiguate multiple 4F/50/87 entries inside PPSE directory entries
+        val groupedEnriched = mutableMapOf<String, List<Pair<String, EnrichedTagData>>>()
+        for ((tag, occurrences) in result.groupedTags) {
+            groupedEnriched[tag] = occurrences.map { (path, hex) ->
+                val tagName = EmvTagDictionary.getTagDescription(tag)
+                val decoded = decodeTagValue(tag, hex)
+                Pair(path, EnrichedTagData(tag, tagName, hex, decoded, phase, source, hex.length / 2, path))
+            }
+        }
+
+        return EmvParseResponse(tags = enrichedTags, grouped = groupedEnriched)
     }
     
     /**
@@ -1019,7 +1080,11 @@ data class EnrichedTagData(
     val valueDecoded: String?,
     val phase: String,
     val source: String?,
-    val length: Int
+    val length: Int,
+    // Hierarchical path where this occurrence was found (e.g. "PPSE/61/4F").
+    // Optional: populated for grouped/nested occurrences so callers can
+    // disambiguate multiple identical tag IDs that appear in different templates.
+    val path: String? = null
 )
 
 /**
@@ -1027,5 +1092,7 @@ data class EnrichedTagData(
  * CardReadingViewModel decides what to do with it
  */
 data class EmvParseResponse(
-    val tags: Map<String, EnrichedTagData>  // All parsed tags with decoded values
+    val tags: Map<String, EnrichedTagData>, // All parsed tags with decoded values
+    // Grouped occurrences: tag -> list of (path, EnrichedTagData) representing each occurrence and its nested path
+    val grouped: Map<String, List<Pair<String, EnrichedTagData>>> = emptyMap()
 )
