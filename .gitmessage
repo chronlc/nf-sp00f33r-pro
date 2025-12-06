@@ -1,0 +1,71 @@
+# [TYPE] Brief summary (50 chars max, imperative mood)
+#
+# Types: FEAT, FIX, REFACTOR, PERF, DOCS, TEST, BUILD, CI, STYLE, CHORE
+#
+# Detailed description (wrap at 72 chars):
+# - What: Describe WHAT changed in code-specific terms
+# - Why: Explain WHY the change was necessary
+# - How: Describe HOW it was implemented (key technical details)
+#
+# Technical Details:
+# - Classes/Functions modified:
+# - Key algorithm/pattern changes:
+# - Performance impact:
+# - Breaking changes:
+#
+# Related:
+# - Issue: #
+# - Depends on:
+# - Related commits:
+#
+# Testing:
+# - Build status:
+# - Test coverage:
+# - Manual verification:
+#
+# Examples of good commit messages:
+# ────────────────────────────────────────────────────────────────────
+# [FEAT] Add Flow-based reactive database observation to DatabaseViewModel
+#
+# Migrated from one-time suspend function getAllSessions() to reactive
+# Flow-based getAllSessionsFlow() for real-time database synchronization.
+#
+# Technical Details:
+# - Modified: DatabaseViewModel.kt
+# - Added: observeDatabaseChanges() using viewModelScope.launch
+# - Changed: init{} now calls observeDatabaseChanges() instead of refreshData()
+# - Pattern: Flow.collectLatest{} ensures only latest emission processed
+# - Threading: Dispatchers.IO for queries, Dispatchers.Main for UI updates
+# - Removed: Manual refreshData() calls from deleteCard() and clearAllCards()
+#
+# Impact:
+# - UI updates automatically when CardReadingViewModel inserts new sessions
+# - No user action required - cards appear instantly after scan
+# - Delete/clear operations trigger automatic refresh via Room Flow
+#
+# Testing:
+# - Build: ./gradlew compileDebugKotlin - SUCCESSFUL
+# - Manual: Verified cards appear in Database Screen after Read Screen scan
+# ────────────────────────────────────────────────────────────────────
+# [FIX] Prevent null pointer exception in EmvTlvParser.parseTag()
+#
+# Added null safety check before accessing TLV tag value in parseTag().
+# Previous code assumed tag.value was non-null, causing crashes when
+# parsing malformed or incomplete EMV responses.
+#
+# Technical Details:
+# - Modified: EmvTlvParser.kt, parseTag() method
+# - Added: Early return with error result if tag.value == null
+# - Changed: Return type from String to Result<String, ParseError>
+# - Pattern: Railway-oriented programming for error handling
+#
+# Root Cause:
+# - Some EMV cards return tag headers without values (length=0)
+# - Parser didn't validate before calling String operations
+# - Crash occurred at: tag.value.substring(0, 2)
+#
+# Testing:
+# - Unit tests: Added parseTag_withNullValue_returnsError()
+# - Integration: Tested with malformed APDU responses
+# - Build: SUCCESSFUL, no regression in existing tests
+# ────────────────────────────────────────────────────────────────────
