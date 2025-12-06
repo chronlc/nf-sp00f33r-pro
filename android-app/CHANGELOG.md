@@ -13,6 +13,32 @@ All notable changes to nf-sp00f33r EMV Security Research Platform.
 
 ---
 
+## [2025-12-06] - Database Auto-Refresh Fix
+
+### 🔧 Fixed
+- **Database Screen Auto-Refresh Issue** ([DatabaseViewModel.kt](android-app/src/main/java/com/nfsp00f33r/app/screens/database/DatabaseViewModel.kt))
+  - **ROOT CAUSE:** Database Screen only loaded data once in `init {}` using `getAllSessions()` suspend function
+  - **SYMPTOM:** Cards scanned in Read Screen did NOT appear in Database Screen without manual navigation away/back
+  - **FIX:** Migrated to reactive Flow observation using `getAllSessionsFlow().collectLatest {}`
+  - Cards now appear in Database Screen **INSTANTLY** after scan completes
+  - Removed manual `refreshData()` calls after delete/clear operations (Flow handles automatically)
+  - Added optional `manualRefresh()` public method for explicit user refresh (pull-to-refresh)
+  - Improved logging: "PHASE 4.5: Auto-refresh complete - X cards displayed"
+  
+### 🎯 Improved
+- **Real-time Database Synchronization**
+  - Database Screen now observes `emvSessionDao.getAllSessionsFlow()` for live updates
+  - Automatic UI updates when Read Screen saves new cards
+  - No user action required - cards appear immediately upon scan completion
+  - Deletion and bulk clear operations also trigger automatic refresh via Flow
+
+### 📝 Technical Details
+- **Flow Collection:** `collectLatest` ensures only latest emission is processed
+- **Thread Safety:** Database queries on `Dispatchers.IO`, UI updates on `Dispatchers.Main`
+- **Performance:** Flow only emits when database actually changes (Room optimization)
+
+---
+
 ## [Phase 3] - 2025-10-10
 
 ### 🔐 ROCA Integration + iCVV/Dynamic CVV + Contact Mode (Nightly Release)

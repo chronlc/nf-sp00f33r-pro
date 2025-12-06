@@ -15,6 +15,7 @@ import com.nfsp00f33r.app.storage.emv.EmvSessionExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.collectLatest
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -27,6 +28,9 @@ import java.util.*
  * Database Screen ViewModel - Phase 4: Now uses EmvSessionDatabase with Room
  * Migrated from CardDataStore to EmvSessionDatabase (single table design)
  * All EMV session data stored in SQLite with 200+ tags per session
+ * 
+ * PHASE 4.5: AUTO-REFRESH FIX - Now observes database changes via Flow
+ * Cards from Read Screen automatically appear without manual refresh!
  */
 class DatabaseViewModel(private val context: Context) : ViewModel() {
     
@@ -76,13 +80,67 @@ class DatabaseViewModel(private val context: Context) : ViewModel() {
         private set
     
     init {
-        // Initial data load from encrypted storage
-        refreshData()
-        Timber.d("DatabaseViewModel initialized - Cards: $totalCards")
+        // PHASE 4.5: Observe database changes in real-time using Flow
+        // This ensures cards scanned in Read Screen automatically appear in Database Screen
+        observeDatabaseChanges()
+        Timber.d("DatabaseViewModel initialized - Observing database with auto-refresh")
+    }
+    
+    /**
+     * PHASE 4.5: Observe database changes in real-time using Flow
+     * Automatically refreshes UI when new cards are saved from Read Screen
+     */
+    private fun observeDatabaseChanges() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Collect Flow emissions - updates automatically when database changes
+                emvSessionDao.getAllSessionsFlow().collectLatest { sessions ->
+                    Timber.d("PHASE 4.5: Database changed - Processing ${sessions.size} sessions")
+                    
+                    // Convert EmvCardSessionEntity to CardProfile for UI compatibility
+                    val appProfiles = sessions.map { session ->
+                        CardProfile(
+                            emvCardData = com.nfsp00f33r.app.data.EmvCardData(
+                                pan = session.pan ?: "",
+                                expiryDate = session.expiryDate ?: "",
+                                cardholderName = session.cardholderName ?: "",
+                                applicationLabel = session.applicationLabel ?: "",
+                                applicationIdentifier = session.applicationIdentifier ?: "",
+                                emvTags = session.allEmvTags.mapValues { it.value.valueDecoded ?: it.value.value },
+                                apduLog = session.apduLog.map { apdu ->
+                                    com.nfsp00f33r.app.data.ApduLogEntry(
+                                        timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(apdu.timestamp)),
+                                        command = apdu.command,
+                                        response = apdu.response,
+                                        statusWord = apdu.statusWord,
+                                        description = apdu.description,
+                                        executionTimeMs = apdu.executionTime
+                                    )
+                                }
+                            ),
+                            apduLogs = mutableListOf(),
+                            cardholderName = session.cardholderName,
+                            aid = session.applicationIdentifier
+                        )
+                    }
+                    
+                    // Update UI state on main thread
+                    withContext(Dispatchers.Main) {
+                        cardProfiles = appProfiles
+                        updateStatistics()
+                        filterCards(searchQuery)
+                        Timber.d("PHASE 4.5: Auto-refresh complete - ${cardProfiles.size} cards displayed")
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "PHASE 4.5: Error observing database changes")
+            }
+        }
     }
     
     /**
      * PHASE 4: Refresh data from EmvSessionDatabase (Room SQLite)
+     * NOTE: This is now redundant with observeDatabaseChanges() but kept for manual refresh capability
      */
     private fun refreshData() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -179,17 +237,25 @@ class DatabaseViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
+     * PHASE 4.5: Manual refresh capability (optional - Flow auto-refreshes)
+     * Useful for pull-to-refresh gestures or explicit user refresh
+     */
+    fun manualRefresh() {
+        Timber.d("PHASE 4.5: Manual refresh requested")
+        refreshData()
+    }
+    
+    /**
      * PHASE 4: Delete session by ID from Room database
+     * NOTE: No manual refresh needed - Flow automatically detects deletion
      */
     fun deleteCard(cardId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 emvSessionDao.deleteById(cardId)
-                Timber.d("PHASE 4: Session deleted from Room: $cardId")
-                // Refresh data from database
-                refreshData()
+                Timber.d("PHASE 4.5: Session deleted from Room: $cardId (auto-refresh via Flow)")
             } catch (e: Exception) {
-                Timber.e(e, "PHASE 4: Error deleting session: $cardId")
+                Timber.e(e, "PHASE 4.5: Error deleting session: $cardId")
             }
         }
     }
@@ -222,16 +288,15 @@ class DatabaseViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
-     * Delete all cards from encrypted storage
+     * Delete all cards from database
+     * NOTE: No manual refresh needed - Flow automatically detects deletion
      */
     fun clearAllCards() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 // PHASE 4: Use Room DAO to clear all sessions
                 emvSessionDao.deleteAll()
-                Timber.d("All cards cleared from database")
-                // Refresh data from storage
-                refreshData()
+                Timber.d("PHASE 4.5: All cards cleared from database (auto-refresh via Flow)")
             } catch (e: Exception) {
                 Timber.e(e, "Failed to clear all cards")
             }
