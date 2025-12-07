@@ -35,6 +35,7 @@ import com.nfsp00f33r.app.emv.TransactionType
 import com.nfsp00f33r.app.emv.TerminalDecision
 import com.nfsp00f33r.app.emv.TransactionParameterManager
 import com.nfsp00f33r.app.emv.CvmProcessor
+import com.nfsp00f33r.app.screens.cardreading.emv.EmvResponseParser
 
 /**
  * PRODUCTION-GRADE Card Reading ViewModel
@@ -626,7 +627,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             statusMessage = "GET PROCESSING OPTIONS..."
         }
         
-        val pdolData = extractPdolFromAllResponses(apduLog)
+        val pdolData = EmvResponseParser.extractPdol(apduLog)
         val gpoData = if (pdolData.isNotEmpty()) {
             val dolEntries = EmvTlvParser.parseDol(pdolData)
             buildPdolData(dolEntries)
@@ -814,14 +815,14 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
         
         // Check if cryptogram already obtained in GPO response
-        val existingCryptogram = extractCryptogramFromAllResponses(apduLog)
+        val existingCryptogram = EmvResponseParser.extractCryptogram(apduLog)
         if (existingCryptogram.isNotEmpty()) {
             Timber.i("💎 Cryptogram already obtained in GPO - skipping GENERATE AC")
             return
         }
         
         // Extract CDOL1 from previous responses
-        val cdol1Data = extractCdol1FromAllResponses(apduLog)
+        val cdol1Data = EmvResponseParser.extractCdol1(apduLog)
         val generateAcData = if (cdol1Data.length >= 4) {
             try {
                 val cdolEntries = EmvTlvParser.parseDol(cdol1Data)
@@ -885,7 +886,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             
             // If ARQC was generated and CDOL2 exists, proceed to GENERATE AC2
             if (selectedTerminalDecision == TerminalDecision.ARQC) {
-                val cdol2Data = extractCdol2FromAllResponses(apduLog)
+                val cdol2Data = EmvResponseParser.extractCdol2(apduLog)
                 if (cdol2Data.length >= 4) {
                     executePhase5b_GenerateAc2(isoDep, cdol2Data)
                 }
@@ -1417,7 +1418,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             val tagName = EmvTagDictionary.getTagDescription(tag)
             val tagData: ByteArray = when (tag) {
                 "9F36" -> { // ATC
-                    val atcHex = extractAtcFromAllResponses(apduLog)
+                    val atcHex = EmvResponseParser.extractAtc(apduLog)
                     if (atcHex.isNotEmpty()) {
                         val atcBytes = atcHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                         Timber.d("  CDOL: 9F36 (ATC) = $atcHex [from card]")
@@ -1428,7 +1429,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                     }
                 }
                 "9F10" -> { // IAD
-                    val iadHex = extractIadFromAllResponses(apduLog)
+                    val iadHex = EmvResponseParser.extractIad(apduLog)
                     if (iadHex.isNotEmpty()) {
                         val iadBytes = iadHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
                         Timber.d("  CDOL: 9F10 (IAD) = $iadHex [from card]")
@@ -1839,55 +1840,11 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     }
     
     // ========== REAL DATA EXTRACTION FUNCTIONS - NO HARDCODED VALUES ==========
-    
-    private fun extractTrack2FromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val track2Regex = "57([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = track2Regex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractExpiryFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val expiryRegex = "5F24([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = expiryRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractCardholderNameFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val nameRegex = "5F20([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = nameRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                val hexName = match.groupValues[2].take(length)
-                return hexName.chunked(2).map { it.toInt(16).toChar() }.joinToString("")
-            }
-        }
-        return ""
-    }
-    
-    private fun extractAipFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val aipRegex = "82([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = aipRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 1 REFACTOR: Parser functions moved to EmvResponseParser.kt
+    // All 20 extractXFromAllResponses() functions now live in separate class
+    // See: com.nfsp00f33r.app.screens.cardreading.emv.EmvResponseParser
+    // ═══════════════════════════════════════════════════════════════════════════
     
     /**
      * Analyze AIP (Application Interchange Profile) for security capabilities
@@ -1955,81 +1912,11 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
     }
     
-    private fun extractAflFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val aflRegex = "94([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = aflRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractPdolFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val pdolRegex = "9F38([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = pdolRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
     
     /**
-     * Extract and parse CVM List (tag 8E) - ENHANCED for PHASE 6
-     * Proxmark3-inspired CVM analysis for verification research
-     */
-    private fun extractCvmListFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val cvmRegex = "8E([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = cvmRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                val cvmData = match.groupValues[2].take(length)
-                
-                // PHASE 6: Parse and log CVM structure
-                if (cvmData.length >= 16) { // Minimum: 4 bytes X + 4 bytes Y + 2 bytes rule
-                    try {
-                        val amountX = cvmData.substring(0, 8)
-                        val amountY = cvmData.substring(8, 16)
-                        val cvmRules = cvmData.substring(16)
-                        
-                        Timber.i("PHASE 6: CVM List Found")
-                        Timber.i("  Amount X (No CVM below): $amountX")
-                        Timber.i("  Amount Y (Online PIN): $amountY")
-                        Timber.i("  CVM Rules: $cvmRules")
-                        
-                        // Parse CVM rules (2 bytes per rule: code + condition)
-                        if (cvmRules.length >= 4) {
-                            var ruleNum = 1
-                            for (i in 0 until cvmRules.length step 4) {
-                                if (i + 3 < cvmRules.length) {
-                                    val cvmCode = cvmRules.substring(i, i + 2)
-                                    val cvmCondition = cvmRules.substring(i + 2, i + 4)
-                                    val decoded = decodeCvmRule(cvmCode, cvmCondition)
-                                    Timber.i("  Rule $ruleNum: $cvmCode/$cvmCondition = $decoded")
-                                    ruleNum++
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Timber.e(e, "PHASE 6: Error parsing CVM list")
-                    }
-                }
-                
-                return cvmData
-            }
-        }
-        return ""
-    }
-    
-    /**
-     * Decode CVM rule code and condition to human-readable format
-     * PHASE 6 ENHANCEMENT: PIN/Signature/NoPIN mappings
+     * Analyze AIP (Application Interchange Profile) for security capabilities
+     * PHASE 3 ENHANCEMENT: Detect SDA/DDA/CDA support and flag weak cards
+     * Proxmark3-inspired security analysis
      */
     private fun decodeCvmRule(cvmCode: String, cvmCondition: String): String {
         val codeInt = try { cvmCode.toInt(16) } catch (e: Exception) { -1 }
@@ -2066,196 +1953,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val failFlag = if ((codeInt and 0x40) != 0) " [Apply Next if Fail]" else " [Fail Entire TX if Fail]"
         
         return "$cvmMethod, $condition$failFlag"
-    }
-    
-    private fun extractIadFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val iadRegex = "9F10([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = iadRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractCryptogramFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val acRegex = "9F26([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = acRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractCidFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val cidRegex = "9F27([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = cidRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractAtcFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val atcRegex = "9F36([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = atcRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    /**
-     * Extract Log Format (tag 9F4F) from APDU responses
-     * PHASE 5 ENHANCEMENT: Used for transaction log reading
-     */
-    private fun extractLogFormatFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val logFormatRegex = "9F4F([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = logFormatRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractUnFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val unRegex = "9F37([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = unRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractCdol1FromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            // CDOL1 (tag 8C) is typically in SELECT AID response (FCI template)
-            // Skip READ RECORD responses (SFI records contain RSA certs with false "8C" matches)
-            if (apdu.description.contains("READ RECORD", ignoreCase = true)) {
-                android.util.Log.d("CDOL_EXTRACT", "Skipping READ RECORD response: ${apdu.description}")
-                return@forEach // Skip this APDU
-            }
-            
-            val response = apdu.response
-            android.util.Log.d("CDOL_EXTRACT", "Searching for tag 8C in: ${apdu.description}")
-            
-            var i = 0
-            while (i < response.length - 4) { // Need at least tag(2) + length(2)
-                if (response.substring(i, i + 2) == "8C") {
-                    val lengthByte = response.substring(i + 2, i + 4)
-                    val lengthInt = try { lengthByte.toInt(16) } catch (e: Exception) { -1 }
-                    
-                    if (lengthInt < 0 || lengthInt > 50) {
-                        // Invalid length for CDOL1 (should be < 50 bytes typically)
-                        android.util.Log.d("CDOL_EXTRACT", "Invalid CDOL1 length $lengthInt at position $i, skipping")
-                        i += 2
-                        continue
-                    }
-                    
-                    val length = lengthInt * 2 // Convert to hex chars
-                    
-                    // Extract CDOL data
-                    if (i + 4 + length <= response.length) {
-                        val cdolData = response.substring(i + 4, i + 4 + length)
-                        android.util.Log.d("CDOL_EXTRACT", "Found tag 8C at position $i, length=$lengthByte ($lengthInt bytes): $cdolData")
-                        return cdolData
-                    }
-                }
-                i += 2 // Move to next byte boundary
-            }
-        }
-        
-        android.util.Log.w("CDOL_EXTRACT", "No CDOL1 found in any response - card may not require CDOL")
-        return ""
-    }
-    
-    private fun extractCdol2FromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val cdol2Regex = "8D([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = cdol2Regex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractAppVersionFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val versionRegex = "9F09([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = versionRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractAucFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val aucRegex = "9F07([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = aucRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractTtqFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val ttqRegex = "9F66([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = ttqRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractCountryCodeFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val countryRegex = "5F28([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = countryRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
-    }
-    
-    private fun extractCurrencyCodeFromAllResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): String {
-        apduLog.forEach { apdu ->
-            val currencyRegex = "5F2A([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = currencyRegex.find(apdu.response)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        }
-        return ""
     }
     
     /**
@@ -2768,12 +2465,12 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
         
         // Extract ALL data from real responses ONLY
-        val extractedTrack2 = extractTrack2FromAllResponses(apduLog)
-        val extractedExpiry = extractExpiryFromAllResponses(apduLog)
-        val extractedCardholderName = extractCardholderNameFromAllResponses(apduLog)
-        val extractedAip = extractAipFromAllResponses(apduLog)
-        val extractedAfl = extractAflFromAllResponses(apduLog)
-        val extractedPdol = extractPdolFromAllResponses(apduLog)
+        val extractedTrack2 = EmvResponseParser.extractTrack2(apduLog)
+        val extractedExpiry = EmvResponseParser.extractExpiryDate(apduLog)
+        val extractedCardholderName = EmvResponseParser.extractCardholderName(apduLog)
+        val extractedAip = EmvResponseParser.extractAip(apduLog)
+        val extractedAfl = EmvResponseParser.extractAfl(apduLog)
+        val extractedPdol = EmvResponseParser.extractPdol(apduLog)
         
         return com.nfsp00f33r.app.data.EmvCardData(
             // Card Hardware Identifier - REAL ONLY
@@ -2793,25 +2490,25 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             processingOptionsDataObjectList = extractedPdol,
             
             // Extract MORE real data from responses - NO HARDCODED VALUES
-            cardholderVerificationMethodList = extractCvmListFromAllResponses(apduLog),
+            cardholderVerificationMethodList = EmvResponseParser.extractCvmList(apduLog),
             
             // Cryptographic Data - REAL EXTRACTED ONLY
-            issuerApplicationData = extractIadFromAllResponses(apduLog),
-            applicationCryptogram = extractCryptogramFromAllResponses(apduLog),
-            cryptogramInformationData = extractCidFromAllResponses(apduLog),
-            applicationTransactionCounter = extractAtcFromAllResponses(apduLog),
-            unpredictableNumber = extractUnFromAllResponses(apduLog),
+            issuerApplicationData = EmvResponseParser.extractIad(apduLog),
+            applicationCryptogram = EmvResponseParser.extractCryptogram(apduLog),
+            cryptogramInformationData = EmvResponseParser.extractCid(apduLog),
+            applicationTransactionCounter = EmvResponseParser.extractAtc(apduLog),
+            unpredictableNumber = EmvResponseParser.extractUn(apduLog),
             
             // Additional EMV Data - REAL EXTRACTED ONLY
-            cdol1 = extractCdol1FromAllResponses(apduLog),
-            cdol2 = extractCdol2FromAllResponses(apduLog),
-            applicationVersion = extractAppVersionFromAllResponses(apduLog),
-            applicationUsageControl = extractAucFromAllResponses(apduLog),
-            terminalTransactionQualifiers = extractTtqFromAllResponses(apduLog),
+            cdol1 = EmvResponseParser.extractCdol1(apduLog),
+            cdol2 = EmvResponseParser.extractCdol2(apduLog),
+            applicationVersion = EmvResponseParser.extractAppVersion(apduLog),
+            applicationUsageControl = EmvResponseParser.extractAuc(apduLog),
+            terminalTransactionQualifiers = EmvResponseParser.extractTtq(apduLog),
             
             // Geographic and Currency - REAL EXTRACTED ONLY
-            issuerCountryCode = extractCountryCodeFromAllResponses(apduLog),
-            currencyCode = extractCurrencyCodeFromAllResponses(apduLog),
+            issuerCountryCode = EmvResponseParser.extractCountryCode(apduLog),
+            currencyCode = EmvResponseParser.extractCurrencyCode(apduLog),
             
             // EMV Tags Map for additional data
             emvTags = buildRealEmvTagsMap(apduLog, finalPan, extractedAid, extractedTrack2),
