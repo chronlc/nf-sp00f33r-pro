@@ -36,6 +36,7 @@ import com.nfsp00f33r.app.emv.TerminalDecision
 import com.nfsp00f33r.app.emv.TransactionParameterManager
 import com.nfsp00f33r.app.emv.CvmProcessor
 import com.nfsp00f33r.app.screens.cardreading.emv.EmvResponseParser
+import com.nfsp00f33r.app.screens.cardreading.emv.EmvDataFormatter
 
 /**
  * PRODUCTION-GRADE Card Reading ViewModel
@@ -1655,195 +1656,22 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     )
     
     
-    /**
-     * Format PAN for display
-     */
-    private fun formatPan(hexPan: String): String {
-        return try {
-            if (hexPan.length >= 13) {
-                val pan = hexPan.replace("F", "").replace("f", "")
-                "${pan.take(6)}****${pan.takeLast(4)}"
-            } else hexPan
-        } catch (e: Exception) {
-            hexPan
-        }
-    }
-    
-    /**
-     * Format Track 2 data
-     */
-    private fun formatTrack2(hexTrack2: String): String {
-        return try {
-            val track2 = hexTrack2.replace("F", "").replace("f", "")
-            if (track2.contains("D")) {
-                val parts = track2.split("D")
-                if (parts.size >= 2) {
-                    val pan = parts[0]
-                    val expiry = parts[1].take(4)
-                    "${pan.take(6)}****${pan.takeLast(4)}D$expiry..."
-                } else track2
-            } else track2
-        } catch (e: Exception) {
-            hexTrack2
-        }
-    }
-    
-    /**
-     * Format expiry date YYMM to MM/YY
-     */
-    private fun formatExpiryDate(hexExpiry: String): String {
-        return try {
-            if (hexExpiry.length == 4) {
-                "${hexExpiry.substring(2, 4)}/${hexExpiry.substring(0, 2)}"
-            } else hexExpiry
-        } catch (e: Exception) {
-            hexExpiry
-        }
-    }
-    
-    /**
-     * Format effective date
-     */
-    private fun formatEffectiveDate(hexDate: String): String {
-        return try {
-            if (hexDate.length == 6) {
-                "${hexDate.substring(4, 6)}/${hexDate.substring(2, 4)}/${hexDate.substring(0, 2)}"
-            } else hexDate
-        } catch (e: Exception) {
-            hexDate
-        }
-    }
-    
-    /**
-     * Convert hex to ASCII
-     */
-    private fun hexToAscii(hex: String): String {
-        return try {
-            hex.chunked(2).map { 
-                val charCode = it.toInt(16)
-                if (charCode in 32..126) charCode.toChar() else '.'
-            }.joinToString("")
-        } catch (e: Exception) {
-            hex
-        }
-    }
-    
-    /**
-     * Extract PAN from Track 2 data
-     */
-    private fun extractPanFromTrack2(track2: String): String {
-        return try {
-            if (track2.contains("D")) {
-                track2.split("D")[0]
-            } else ""
-        } catch (e: Exception) {
-            ""
-        }
-    }
-    
-    /**
-     * Extract expiry from Track 2 data  
-     */
-    private fun extractExpiryFromTrack2(track2: String): String {
-        return try {
-            if (track2.contains("D")) {
-                val afterD = track2.split("D")[1]
-                if (afterD.length >= 4) {
-                    val expiry = afterD.take(4)
-                    "${expiry.substring(2, 4)}/${expiry.substring(0, 2)}"
-                } else ""
-            } else ""
-        } catch (e: Exception) {
-            ""
-        }
-    }
-
-    /**
-     * Extract AIP from response - LIVE ANALYSIS
-     */
-    private fun extractAipFromResponse(hexResponse: String): String {
-        try {
-            val aipRegex = "82([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = aipRegex.find(hexResponse)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Error extracting AIP")
-        }
-        return ""
-    }
-    
-    /**
-     * Extract AFL from response - LIVE ANALYSIS
-     */
-    private fun extractAflFromResponse(hexResponse: String): String {
-        try {
-            val aflRegex = "94([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = aflRegex.find(hexResponse)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Error extracting AFL")
-        }
-        return ""
-    }
-    
-    /**
-     * Extract AID from EMV response data
-     */
-    private fun extractAidFromResponse(hexResponse: String): String {
-        try {
-            val aidRegex = "4F([0-9A-F]{2})([0-9A-F]+)".toRegex()
-            val match = aidRegex.find(hexResponse)
-            if (match != null) {
-                val length = match.groupValues[1].toInt(16) * 2
-                return match.groupValues[2].take(length)
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Error extracting AID")
-        }
-        return ""
-    }
-
-    /**
-     * Extract PAN from EMV response data
-     */
-    private fun extractPanFromResponse(hexResponse: String): String {
-        try {
-            // Look for Track 2 data (tag 57) or PAN (tag 5A)
-            val track2Regex = "57[0-9A-F]{2}([0-9A-F]+)D".toRegex()
-            val panRegex = "5A[0-9A-F]{2}([0-9A-F]+)".toRegex()
-            
-            // Try Track 2 first
-            val track2Match = track2Regex.find(hexResponse)
-            if (track2Match != null) {
-                val track2Data = track2Match.groupValues[1]
-                val panFromTrack2 = track2Data.split("D")[0]
-                if (panFromTrack2.length >= 13) return panFromTrack2
-            }
-            
-            // Try direct PAN tag
-            val panMatch = panRegex.find(hexResponse)
-            if (panMatch != null) {
-                val panData = panMatch.groupValues[1]
-                if (panData.length >= 13) return panData
-            }
-            
-        } catch (e: Exception) {
-            Timber.e(e, "Error extracting PAN")
-        }
-        return ""
-    }
-    
     // ========== REAL DATA EXTRACTION FUNCTIONS - NO HARDCODED VALUES ==========
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 1 REFACTOR: Parser functions moved to EmvResponseParser.kt
     // All 20 extractXFromAllResponses() functions now live in separate class
     // See: com.nfsp00f33r.app.screens.cardreading.emv.EmvResponseParser
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 2 REFACTOR: Formatter and legacy extractor functions removed
+    // - 7 formatting functions moved to EmvDataFormatter.kt
+    //   (formatPan, formatTrack2, formatExpiryDate, formatEffectiveDate,
+    //    hexToAscii, extractPanFromTrack2, extractExpiryFromTrack2)
+    // - 4 legacy extractXFromResponse functions deleted (unused dead code)
+    //   (extractAipFromResponse, extractAflFromResponse, extractAidFromResponse,
+    //    extractPanFromResponse)
+    // See: com.nfsp00f33r.app.screens.cardreading.emv.EmvDataFormatter
     // ═══════════════════════════════════════════════════════════════════════════
     
     /**
@@ -2077,8 +1905,14 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     private fun extractAllAidsFromResponses(apduLog: List<com.nfsp00f33r.app.data.ApduLogEntry>): List<String> {
         val aids = mutableSetOf<String>()
         apduLog.forEach { apdu ->
-            val aid = extractAidFromResponse(apdu.response)
-            if (aid.isNotEmpty()) aids.add(aid)
+            // Inline extraction of AID (tag 4F)
+            val aidRegex = "4F([0-9A-F]{2})([0-9A-F]+)".toRegex()
+            val match = aidRegex.find(apdu.response)
+            if (match != null) {
+                val length = match.groupValues[1].toInt(16) * 2
+                val aid = match.groupValues[2].take(length)
+                if (aid.isNotEmpty()) aids.add(aid)
+            }
         }
         return aids.toList()
     }
@@ -2441,7 +2275,22 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         // Extract ONLY real PAN from APDU responses - NO FALLBACKS
         var extractedPan = ""
         apduLog.forEach { apdu ->
-            val pan = extractPanFromResponse(apdu.response)
+            // Inline extraction of PAN (tag 5A or from Track 2 tag 57)
+            val track2Regex = "57[0-9A-F]{2}([0-9A-F]+)D".toRegex()
+            val panRegex = "5A[0-9A-F]{2}([0-9A-F]+)".toRegex()
+            
+            var pan = ""
+            val track2Match = track2Regex.find(apdu.response)
+            if (track2Match != null) {
+                val track2Data = track2Match.groupValues[1]
+                pan = track2Data.split("D")[0]
+            } else {
+                val panMatch = panRegex.find(apdu.response)
+                if (panMatch != null) {
+                    pan = panMatch.groupValues[1]
+                }
+            }
+            
             if (pan.isNotEmpty()) {
                 extractedPan = pan
                 return@forEach
@@ -2452,10 +2301,16 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         val finalPan = extractedPan
         var extractedAid = ""
         apduLog.forEach { apdu ->
-            val aid = extractAidFromResponse(apdu.response)
-            if (aid.isNotEmpty()) {
-                extractedAid = aid
-                return@forEach
+            // Inline extraction of AID (tag 4F)
+            val aidRegex = "4F([0-9A-F]{2})([0-9A-F]+)".toRegex()
+            val match = aidRegex.find(apdu.response)
+            if (match != null) {
+                val length = match.groupValues[1].toInt(16) * 2
+                val aid = match.groupValues[2].take(length)
+                if (aid.isNotEmpty()) {
+                    extractedAid = aid
+                    return@forEach
+                }
             }
         }
         
