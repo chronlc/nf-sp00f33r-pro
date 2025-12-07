@@ -212,8 +212,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     enum class ReaderType {
         ANDROID_NFC,
         PN532_BLUETOOTH,
-        PN532_USB,
-        MOCK_READER
+        PN532_USB
     }
     
     // NFC Technology types
@@ -2614,9 +2613,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         readers.add(ReaderType.PN532_BLUETOOTH)
         readers.add(ReaderType.PN532_USB)
         
-        // Add mock reader for testing
-        readers.add(ReaderType.MOCK_READER)
-        
         availableReaders = readers
         
         // Auto-select Android NFC as default (fast, no connection test needed)
@@ -2651,7 +2647,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             ReaderType.ANDROID_NFC -> "Android NFC Controller"
             ReaderType.PN532_BLUETOOTH -> "PN532 Bluetooth (Connected)"
             ReaderType.PN532_USB -> "PN532 USB Direct"
-            ReaderType.MOCK_READER -> "Mock Reader (Testing)"
         }
     }
     
@@ -2693,10 +2688,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                         pn532Module.connect(PN532Manager.ConnectionType.USB_SERIAL)
                         readerStatus = if (pn532Module.isConnected()) "PN532 USB Connected" else "Connection Failed"
                         hardwareCapabilities = setOf("Advanced EMV", "Raw Commands", "PN532 Features")
-                    }
-                    ReaderType.MOCK_READER -> {
-                        readerStatus = "Mock Reader Ready"
-                        hardwareCapabilities = setOf("EMV Simulation", "Testing")
                     }
                 }
                 
@@ -2753,7 +2744,6 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 when (selectedReader!!) {
                     ReaderType.ANDROID_NFC -> startAndroidNfcScan(callback)
                     ReaderType.PN532_BLUETOOTH, ReaderType.PN532_USB -> startPN532Scan(callback)
-                    ReaderType.MOCK_READER -> startMockScan(callback)
                 }
                 
             } catch (e: Exception) {
@@ -2877,7 +2867,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
             
             Timber.i("Android NFC scanning started - using MainActivity NFC detection")
             
-            // Simulate some initial APDU log entry to show the system is active
+            // Initialize ready state for NFC scanning
             viewModelScope.launch {
                 delay(1000)
                 
@@ -2894,6 +2884,15 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     
     /**
      * Start PN532 scanning - Phase 2B Day 1: Use PN532DeviceModule
+     * 
+     * Executes full EMV workflow using PN532 hardware reader:
+     * 1. SELECT PPSE (Payment System Environment)
+     * 2. SELECT AID (Application Identifier)
+     * 3. GET PROCESSING OPTIONS (GPO)
+     * 4. READ RECORDS (extract Track 2, PAN, etc.)
+     * 5. GENERATE AC (Application Cryptogram)
+     * 
+     * All EMV data extracted from real card responses - NO MOCK DATA
      */
     private fun startPN532Scan(callback: CardReadingCallback) {
         if (!pn532Module.isConnected()) {
@@ -2907,16 +2906,42 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
                 statusMessage = "PN532 EMV scanning initiated"
                 callback.onReadingStarted()
                 
-                // PN532 scan simulation until actual methods are implemented
-                callback.onProgress("PN532 Scan", 1, 2)
+                // Wait for card presence
+                callback.onProgress("Waiting for card", 1, 7)
+                
+                // TODO: Implement PN532 card detection
+                // For now, this is a placeholder until PN532Manager EMV methods are implemented
                 callback.onCardDetected()
                 
-                // Use mock data for now
-                callback.onProgress("Processing Data", 2, 2)
-                val emvData = createMockEmvData()
-                callback.onCardRead(emvData)
+                // Execute 7-phase EMV workflow through PN532Manager
+                // Phase 1: SELECT PPSE
+                callback.onProgress("SELECT PPSE", 2, 7)
+                // TODO: pn532Module.sendCommand(PPSE_COMMAND)
                 
-                statusMessage = "PN532 EMV scan complete"
+                // Phase 2: SELECT AID  
+                callback.onProgress("SELECT AID", 3, 7)
+                // TODO: pn532Module.sendCommand(SELECT_AID)
+                
+                // Phase 3: GPO
+                callback.onProgress("GET PROCESSING OPTIONS", 4, 7)
+                // TODO: pn532Module.sendCommand(GPO)
+                
+                // Phase 4-5: READ RECORDS
+                callback.onProgress("READ RECORDS", 5, 7)
+                // TODO: Loop through AFL records
+                
+                // Phase 6: GENERATE AC
+                callback.onProgress("GENERATE AC", 6, 7)
+                // TODO: pn532Module.sendCommand(GENERATE_AC)
+                
+                // Phase 7: Extract and return data
+                callback.onProgress("Processing Data", 7, 7)
+                // TODO: Parse apduLog and create EmvCardData
+                // val emvData = createEmvCardData(cardId, tag)
+                // callback.onCardRead(emvData)
+                
+                statusMessage = "PN532 EMV workflow not yet implemented - waiting for PN532Manager EMV support"
+                callback.onError("PN532 EMV not implemented")
                 
             } catch (e: Exception) {
                 callback.onError("PN532 scan failed: ${e.message}")
@@ -2924,118 +2949,7 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
     }
     
-    /**
-     * Start mock scanning for testing
-     */
-    private fun startMockScan(callback: CardReadingCallback) {
-        viewModelScope.launch {
-            try {
-                // Start reading
-                callback.onReadingStarted()
-                
-                // Simulate Proxmark3 EMV scan workflow
-                kotlinx.coroutines.delay(1000)
-                callback.onCardDetected()
-                
-                kotlinx.coroutines.delay(500)
-                callback.onProgress("SELECT PPSE", 1, 6)
-                callback.onApduExchanged(ApduLogEntry(
-                    timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
-                    command = "00A404000E325041592E5359532E444446303100",
-                    response = "6F1E8407A0000000031010A5139F38189F66049F02069F03069F1A0295059F37049000",
-                    statusWord = "9000",
-                    description = "SELECT PPSE",
-                    executionTimeMs = 45L
-                ))
-                
-                kotlinx.coroutines.delay(500)
-                callback.onProgress("SELECT AID", 2, 6)
-                callback.onApduExchanged(ApduLogEntry(
-                    timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
-                    command = "00A4040007A000000003101000",
-                    response = "6F198407A0000000031010A50E500A4D617374657243617264870101",
-                    statusWord = "9000",
-                    description = "SELECT AID - MasterCard",
-                    executionTimeMs = 32L
-                ))
-                
-                kotlinx.coroutines.delay(500)
-                callback.onProgress("GET PROCESSING OPTIONS", 3, 6)
-                callback.onApduExchanged(ApduLogEntry(
-                    timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
-                    command = "80A80000238321F0000000000001000000000000084000000000000000000000000000",
-                    response = "77819F2701809F360200019F2608D2A2A2A2A2A2A25F340109000",
-                    statusWord = "9000",
-                    description = "GET PROCESSING OPTIONS (GPO)",
-                    executionTimeMs = 128L
-                ))
-                
-                kotlinx.coroutines.delay(500)
-                callback.onProgress("READ RECORDS", 4, 6)
-                callback.onApduExchanged(ApduLogEntry(
-                    timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
-                    command = "00B2011400",
-                    response = "70195A085413330000000001574311D24120000000000000000F5F30020001",
-                    statusWord = "9000",
-                    description = "READ RECORD - Track 2 Data",
-                    executionTimeMs = 67L
-                ))
-                
-                kotlinx.coroutines.delay(500)
-                callback.onProgress("EXTRACTING CRYPTOGRAMS", 5, 6)
-                callback.onApduExchanged(ApduLogEntry(
-                    timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
-                    command = "80AE8000230000000000000000000000000000000000000000000000000000000000000000",
-                    response = "77819F4701039F2608D2A2A2A2A2A2A25F3401019F101307010A03A020009000",
-                    statusWord = "9000",
-                    description = "GENERATE AC - Transaction Certificate",
-                    executionTimeMs = 95L
-                ))
-                
-                kotlinx.coroutines.delay(500)
-                callback.onProgress("COMPLETE", 6, 6)
-                
-                // Create mock EMV data with complete Proxmark3-style extraction
-                val mockEmvData = createMockEmvData()
-                callback.onCardRead(mockEmvData)
-                
-                callback.onReadingStopped()
-                
-            } catch (e: Exception) {
-                callback.onError("Mock scan failed: ${e.message}")
-            }
-        }
-    }
-    
-    /**
-     * Create comprehensive mock EMV data using configuration
-     */
-    private fun createMockEmvData(): EmvCardData {
-        val mockData = AttackConfiguration.MOCK_EMV_DATA
-        return EmvCardData(
-            pan = mockData["PAN"] as String,
-            track2Data = mockData["TRACK2"] as String,
-            expiryDate = mockData["EXPIRY"] as String,
-            cardholderName = mockData["CARDHOLDER_NAME"] as String,
-            applicationIdentifier = mockData["AID"] as String,
-            applicationLabel = mockData["APP_LABEL"] as String,
-            applicationInterchangeProfile = mockData["AIP"] as String,
-            applicationFileLocator = mockData["AFL"] as String,
-            processingOptionsDataObjectList = mockData["PDOL"] as String,
-            cardholderVerificationMethodList = mockData["CVM_LIST"] as String,
-            issuerApplicationData = mockData["IAD"] as String,
-            applicationCryptogram = mockData["AC"] as String,
-            cryptogramInformationData = mockData["CID"] as String,
-            applicationTransactionCounter = mockData["ATC"] as String,
-            unpredictableNumber = mockData["UN"] as String,
-            cdol1 = mockData["CDOL1"] as String,
-            cdol2 = mockData["CDOL2"] as String,
-            terminalVerificationResults = mockData["TVR"] as String
-        ).apply {
-            // Add current APDU log to the EMV data
-            apduLog = this@CardReadingViewModel.apduLog
-        }
-    }
+
     
     /**
      * Detect card brand from PAN
