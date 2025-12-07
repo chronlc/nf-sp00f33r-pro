@@ -506,7 +506,46 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         }
     }
     
-    /** Phase 1: PPSE Selection */
+    /**
+     * PHASE 1: SELECT PPSE (Payment System Environment)
+     * 
+     * First step in EMV contactless transaction workflow. Selects the PPSE application
+     * which contains a list of payment AIDs (Application Identifiers) supported by the card.
+     * 
+     * EMV SPEC: Book 1 - Application Selection
+     * - PPSE AID: "2PAY.SYS.DDF01" (contactless, 0x32...) or "1PAY.SYS.DDF01" (contact, 0x31...)
+     * - Command: 00 A4 04 00 [length] [PPSE AID] 00
+     * - Expected response: FCI (File Control Information) containing AIDs in tag 6F
+     * 
+     * Contactless vs Contact Mode:
+     * - Contactless (2PAY): Default mode for NFC transactions, supports qVSDC/MSD/CDA
+     * - Contact (1PAY): Fallback mode for contact chip, used if 2PAY fails
+     * - Auto-fallback: If forceContactMode=false and 2PAY fails, tries 1PAY automatically
+     * 
+     * Response Structure:
+     * ```
+     * 6F XX          - FCI Template
+     *   84 0E        - DF Name (PPSE AID echo)
+     *     325041592E5359532E4444463031
+     *   A5 XX        - FCI Proprietary Template
+     *     88 01 XX   - SFI of Directory Elementary File
+     *     BF0C XX    - FCI Issuer Discretionary Data
+     *       61 XX    - Application Template (repeats for each AID)
+     *         4F XX  - AID (Application Identifier)
+     *         50 XX  - Application Label (e.g., "VISA CREDIT")
+     *         87 01 XX - Application Priority Indicator (1=highest)
+     * ```
+     * 
+     * Failure Handling:
+     * - SW=6A82: PPSE not found (card may support direct AID selection only)
+     * - SW=6A81: Function not supported (try 1PAY fallback)
+     * - SW=6283: Selected file invalidated (card malfunction)
+     * - Returns empty list on failure - caller must try direct AID selection
+     * 
+     * @param isoDep Android NFC IsoDep interface for card communication
+     * @return List of AidEntry objects extracted from PPSE response, or empty list on failure
+     * @throws IOException if card communication fails
+     */
     private suspend fun executePhase1_PpseSelection(isoDep: android.nfc.tech.IsoDep): List<AidEntry> {
         withContext(Dispatchers.Main) {
             currentPhase = "Phase 1: PPSE"
@@ -578,6 +617,58 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     }
     
     /** Phase 2: Multi-AID Selection */
+    /**
+     * PHASE 2: SELECT AID (Application Identifier)
+     * 
+     * Selects payment application(s) from the list retrieved in Phase 1 (PPSE).
+     * Card may support multiple AIDs (Visa, Mastercard, Amex on same card).
+     * Terminal tries each AID and uses first successful selection for transaction.
+     * 
+     * EMV SPEC: Book 1 - Application Selection, Section 4.3
+     * - Command: 00 A4 04 00 [length] [AID] 00
+     * - AID examples:
+     *   * A0000000031010 = Visa Debit/Credit
+     *   * A0000000041010 = Mastercard
+     *   * A000000025     = American Express
+     * - Response: FCI containing PDOL (tag 9F38), AIP, Application Label
+     * 
+     * Multi-AID Strategy:
+     * - PPSE may return 2-5 AIDs with priority indicators (tag 87)
+     * - Terminal selects ALL AIDs, not just first one (for comprehensive data extraction)
+     * - First successful AID becomes active application for transaction
+     * - Additional AIDs logged for analysis (some cards hide data in secondary AIDs)
+     * 
+     * Response Structure (SELECT AID):
+     * ```
+     * 6F XX          - FCI Template
+     *   84 XX        - DF Name (AID echo)
+     *   A5 XX        - FCI Proprietary Template
+     *     50 XX      - Application Label ("VISA CREDIT")
+     *     87 01 XX   - Application Priority Indicator
+     *     9F38 XX    - PDOL (Processing Options Data Object List)
+     *       9F66 04 9F02 06 9F03 06 ... (tags + lengths needed for GPO)
+     *     5F2D XX    - Language Preference ("en")
+     *     9F11 01 XX - Issuer Code Table Index
+     *     9F12 XX    - Application Preferred Name
+     * ```
+     * 
+     * PDOL Extraction:
+     * - Tag 9F38 contains list of data elements card needs for GPO command
+     * - Format: Tag1 Length1 Tag2 Length2 ... (TLV without values)
+     * - Terminal must provide ALL requested data in Phase 3 (buildPdolData)
+     * - Missing PDOL = use default PDOL or zero-filled data
+     * 
+     * Priority Handling:
+     * - Tag 87 = 01: Highest priority (try first)
+     * - Tag 87 = 02-0F: Lower priority
+     * - No tag 87: Equal priority
+     * - This implementation tries all AIDs regardless of priority
+     * 
+     * @param isoDep Android NFC IsoDep interface for card communication
+     * @param aidEntries List of AID entries from PPSE response (Phase 1)
+     * @return Selected AID hex string (first successful), or empty string if all failed
+     * @throws IOException if card communication fails
+     */
     private suspend fun executePhase2_AidSelection(isoDep: android.nfc.tech.IsoDep, aidEntries: List<AidEntry>): String {
         withContext(Dispatchers.Main) {
             currentPhase = "Phase 2: Multi-AID"
@@ -619,7 +710,79 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return selectedAid
     }
     
-    /** Phase 3: GPO */
+    /**
+     * PHASE 3: GET PROCESSING OPTIONS (GPO)
+     * 
+     * Initiates transaction by sending terminal parameters to card and receiving:
+     * - AFL (Application File Locator): List of records to read in Phase 4
+     * - AIP (Application Interchange Profile): Card capabilities and supported features
+     * - Optional: ATC, IAD, cryptogram info
+     * 
+     * EMV SPEC: Book 3 - Section 6.5.8 (GET PROCESSING OPTIONS)
+     * - Command: 80 A8 00 00 [length] [PDOL data] 00
+     * - PDOL data built in buildPdolData() using card's requested tags from Phase 2
+     * - Response format: Either Format 1 (primitive) or Format 2 (constructed TLV)
+     * 
+     * GPO Command Structure:
+     * ```
+     * 80 A8 00 00 [len] 83 [PDOL_len] [PDOL_data...] 00
+     * 
+     * Example:
+     * 80 A8 00 00 23      - Command header (len=0x23=35 bytes)
+     *   83 21             - Tag 83, length 33 bytes (PDOL data)
+     *     B0000000        - TTQ (9F66): qVSDC mode
+     *     000000000100    - Amount (9F02): $1.00
+     *     000000000000    - Amount Other (9F03): $0.00
+     *     0840            - Country Code (9F1A): USA
+     *     0000000000      - TVR (95): All bits clear
+     *     0840            - Currency (5F2A): USD
+     *     251207          - Date (9A): 2025-12-07
+     *     00              - Transaction Type (9C): Purchase
+     *     12345678        - Unpredictable Number (9F37): Random
+     *     22              - Terminal Type (9F35): Unattended
+     *   00                - Le (expect response)
+     * ```
+     * 
+     * Response Format 1 (Primitive - rare):
+     * ```
+     * 80 0E              - Primitive response, 14 bytes
+     *   0380             - AIP (2 bytes)
+     *   10010301...      - AFL (12 bytes)
+     * ```
+     * 
+     * Response Format 2 (Constructed TLV - common):
+     * ```
+     * 77 XX              - Response Message Template
+     *   82 02 0380       - AIP (Application Interchange Profile)
+     *   94 0C 10010301... - AFL (Application File Locator)
+     *   9F36 02 0001     - ATC (Application Transaction Counter)
+     *   9F10 XX ...      - IAD (Issuer Application Data)
+     * ```
+     * 
+     * AIP (Tag 82) - Application Interchange Profile:
+     * - Byte 1, Bit 7: SDA supported
+     * - Byte 1, Bit 6: DDA supported  
+     * - Byte 1, Bit 5: Cardholder verification supported
+     * - Byte 1, Bit 1: CDA supported
+     * - Example: 0x03 0x80 = CDA supported, issuer auth supported
+     * 
+     * AFL (Tag 94) - Application File Locator:
+     * - List of records to read in Phase 4
+     * - Format: [SFI][first_rec][last_rec][offline_auth_recs] (4 bytes per entry)
+     * - Example: 10 01 03 01 = SFI 2, records 1-3, 1 used for offline auth
+     * - Parsed in parseAflForRecords() to generate READ RECORD commands
+     * 
+     * PDOL Handling:
+     * - If Phase 2 provided PDOL (tag 9F38): Use buildPdolData()
+     * - If no PDOL: Send minimal PDOL with defaults
+     * - Card MUST accept PDOL data or transaction fails
+     * 
+     * @param isoDep Android NFC IsoDep interface for card communication
+     * @return AFL hex string extracted from response (tag 94), or empty if GPO failed
+     * @throws IOException if card communication fails
+     * @see buildPdolData for PDOL construction logic
+     * @see parseAflForRecords for AFL parsing into SFI/record list
+     */
     private suspend fun executePhase3_Gpo(isoDep: android.nfc.tech.IsoDep): String {
         withContext(Dispatchers.Main) {
             currentPhase = "Phase 3: GPO"
@@ -661,7 +824,87 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return afl
     }
     
-    /** Phase 4: Read Records */
+    /**
+     * PHASE 4: READ RECORDS
+     * 
+     * Reads card data files specified by AFL (Application File Locator) from Phase 3.
+     * Extracts critical payment data: PAN, expiry date, Track 2, cardholder name.
+     * This is where the actual card data lives - all previous phases were negotiation.
+     * 
+     * EMV SPEC: Book 3 - Section 6.5.11 (READ RECORD Command)
+     * - Command: 00 B2 [record] [P2] 00
+     * - P2 format: (SFI << 3) | 0x04  (SFI in upper 5 bits, bit 2 set for record number mode)
+     * - Example: SFI=2, P2=0x14 (0001 0100 binary)
+     * 
+     * AFL Structure (from Phase 3):
+     * ```
+     * AFL hex: 10 01 03 01 18 01 02 00
+     * 
+     * Entry 1: 10 01 03 01
+     *   10 = SFI 2 in upper 5 bits (0001 0000 >> 3 = 2)
+     *   01 = First record number
+     *   03 = Last record number
+     *   01 = Number of records for offline authentication
+     * 
+     * Entry 2: 18 01 02 00
+     *   18 = SFI 3 (0001 1000 >> 3 = 3)
+     *   01 = First record
+     *   02 = Last record
+     *   00 = No offline auth records
+     * 
+     * Terminal must read: SFI 2 records 1-3, SFI 3 records 1-2
+     * ```
+     * 
+     * READ RECORD Command Examples:
+     * ```
+     * 00 B2 01 14 00  - Read SFI 2, record 1 (P2 = 0x14)
+     * 00 B2 02 14 00  - Read SFI 2, record 2
+     * 00 B2 03 14 00  - Read SFI 2, record 3
+     * 00 B2 01 1C 00  - Read SFI 3, record 1 (P2 = 0x1C)
+     * 00 B2 02 1C 00  - Read SFI 3, record 2
+     * ```
+     * 
+     * Record Response Structure:
+     * ```
+     * 70 XX          - Record template (EMV format)
+     *   5A 08 5413330000000001           - PAN (Primary Account Number)
+     *   57 13 5413330000000001D25122...  - Track 2 Equivalent Data
+     *   5F24 03 251231                   - Expiry Date (YYMMDD)
+     *   5F20 XX ...                      - Cardholder Name
+     *   5F30 02 0001                     - Service Code
+     *   9F07 02 FFC0                     - Application Usage Control
+     *   8C XX ...                        - CDOL1 (for GENERATE AC)
+     *   8D XX ...                        - CDOL2 (for second GENERATE AC)
+     * ```
+     * 
+     * Key Tags Extracted:
+     * - 5A: PAN (16-19 digits, may be BCD or ASCII)
+     * - 57: Track 2 (PAN + D separator + expiry + service code)
+     * - 5F24: Expiry date (3 bytes BCD: YY MM DD)
+     * - 5F20: Cardholder name (variable length ASCII)
+     * - 8C: CDOL1 (needed for Phase 5 GENERATE AC)
+     * - 8D: CDOL2 (needed for Phase 5b second GENERATE AC)
+     * - 8E: CVM List (Cardholder Verification Method)
+     * 
+     * Error Handling with Retry Logic:
+     * - 6A83: Record not found (may be transient card state issue)
+     * - 6A82: File not found (wrong SFI or AFL parse error)
+     * - 6B00: Wrong parameters P1/P2
+     * - Retry strategy: 2 attempts with AID re-selection between tries
+     * - Re-select AID to reset card state before retry
+     * - 150ms delay between retries to allow card recovery
+     * 
+     * Fallback Strategy:
+     * - If AFL parsing fails: Try default SFI/record combinations
+     * - Default reads: SFI 1 recs 1-3, SFI 2 recs 1-2, SFI 3 recs 1-2
+     * - Covers most common card configurations
+     * 
+     * @param isoDep Android NFC IsoDep interface for card communication
+     * @param afl AFL hex string from Phase 3 GPO response (tag 94)
+     * @throws IOException if card communication fails
+     * @see parseAflForRecords for AFL parsing logic
+     * @see EmvTlvParser.parseResponse for record TLV parsing
+     */
     private suspend fun executePhase4_ReadRecords(isoDep: android.nfc.tech.IsoDep, afl: String) {
         withContext(Dispatchers.Main) {
             currentPhase = "Phase 4: Reading Records"
@@ -806,6 +1049,106 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      * - TC (0x40): Transaction approved offline
      * - ARQC (0x80): Online authorization required
      * - CDA (0x10): Add CDA request flag for CDA transaction type
+     */
+    /**
+     * PHASE 5: GENERATE AC (Application Cryptogram)
+     * 
+     * Requests cryptogram from card to finalize transaction. Card generates one of:
+     * - TC (Transaction Certificate): Offline approval
+     * - ARQC (Authorization Request Cryptogram): Go online to issuer
+     * - AAC (Application Authentication Cryptogram): Decline
+     * 
+     * EMV SPEC: Book 3 - Section 6.5.5 (GENERATE AC Command)
+     * - Command: 80 AE [ref_control] 00 [length] [CDOL data] 00
+     * - ref_control (P1): Terminal's decision (REQUEST_TC, REQUEST_ARQC, FORCE_AAC)
+     * - CDOL data: Built using buildCdolData() with card's CDOL1 from Phase 4
+     * 
+     * Reference Control (P1) Values:
+     * ```
+     * 0x40 (0100 0000): Request TC  - "Approve offline"
+     * 0x80 (1000 0000): Request ARQC - "Go online for approval"
+     * 0x00 (0000 0000): Request AAC  - "Decline transaction"
+     * 
+     * Upper 2 bits encode request:
+     * - 01: TC requested
+     * - 10: ARQC requested
+     * - 00: AAC requested
+     * ```
+     * 
+     * Terminal Decision Logic:
+     * - User selects via advancedTerminalDecision:
+     *   * REQUEST_TC: P1=0x40, TVR=0000000000 (all checks passed)
+     *   * REQUEST_ARQC: P1=0x80, TVR=0400000000 (go online bit set)
+     *   * FORCE_AAC: P1=0x00, TVR=8000000000 (offline decline)
+     * - Card may override: Can return AAC even if TC requested
+     * 
+     * GENERATE AC Command Structure:
+     * ```
+     * 80 AE 40 00 [len] [CDOL1 data...] 00
+     * 
+     * Example (Request TC):
+     * 80 AE 40 00 23      - Request TC, len=35 bytes
+     *   000000000100      - Amount (9F02)
+     *   000000000000      - Amount Other (9F03)
+     *   0840              - Country Code (9F1A)
+     *   0000000000        - TVR (95): Approve offline
+     *   0840              - Currency (5F2A)
+     *   251207            - Date (9A)
+     *   00                - Transaction Type (9C)
+     *   12345678          - Unpredictable Number (9F37)
+     *   22                - Terminal Type (9F35)
+     *   0001              - ATC (9F36) from card
+     *   ...               - Additional CDOL1 tags
+     *   00                - Le
+     * ```
+     * 
+     * Response Structure:
+     * ```
+     * 77 XX              - Response Message Template
+     *   9F27 01 80       - CID (Cryptogram Information Data)
+     *     Byte value:
+     *     0x40 = TC generated (offline approved)
+     *     0x80 = ARQC generated (go online)
+     *     0x00 = AAC generated (declined)
+     *   9F36 02 0001     - ATC (Application Transaction Counter)
+     *   9F26 08 1234...  - AC (Application Cryptogram) 8 bytes
+     *   9F10 XX ...      - IAD (Issuer Application Data)
+     *   9F37 04 ...      - Unpredictable Number (echo)
+     * ```
+     * 
+     * CID (Tag 9F27) - Cryptogram Information Data:
+     * - Bits 7-6: Cryptogram type
+     *   * 00 = AAC (decline)
+     *   * 01 = TC (approve)
+     *   * 10 = ARQC (online)
+     * - Bits 5-0: Reason/advice codes
+     * 
+     * AC (Tag 9F26) - Application Cryptogram:
+     * - 8 bytes of encrypted data
+     * - Generated using card's master key + transaction data
+     * - Issuer validates cryptogram to detect cloned cards
+     * - Cannot be decrypted by terminal (issuer-only)
+     * 
+     * ATC (Tag 9F36) - Application Transaction Counter:
+     * - Increments each transaction
+     * - Used in cryptogram generation
+     * - Prevents replay attacks
+     * 
+     * CDOL Handling:
+     * - If Phase 4 provided CDOL1 (tag 8C): Use buildCdolData()
+     * - If no CDOL1: Use minimal default CDOL
+     * - CDOL2 (tag 8D) used for second GENERATE AC if card requests online (Phase 5b)
+     * 
+     * Security Notes:
+     * - Cryptogram proves card is genuine (not cloned)
+     * - TVR (Terminal Verification Results) influences card's decision
+     * - Card may decline even if terminal requests TC (risk management)
+     * 
+     * @param isoDep Android NFC IsoDep interface for card communication
+     * @throws IOException if card communication fails
+     * @see buildCdolData for CDOL1 construction logic
+     * @see TerminalDecision for P1 reference control values
+     * @see executePhase5b_GenerateAc2 for second GENERATE AC with issuer response
      */
     private suspend fun executePhase5_GenerateAc(isoDep: android.nfc.tech.IsoDep) {
         withContext(Dispatchers.Main) {
@@ -1349,10 +1692,58 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
      * Proxmark3-inspired dynamic data generation
      */
     /**
-     * Build dynamic PDOL data using TransactionParameterManager
-     * Proxmark3-inspired: Uses terminal configuration and transaction parameters
+     * Build PDOL (Processing Options Data Object List) data for GET PROCESSING OPTIONS command
      * 
-     * ENHANCEMENT: Now uses TransactionType to set TTQ (tag 9F66) dynamically
+     * PDOL is a list of terminal data elements requested by the card during GPO (Phase 3).
+     * The card specifies which tags it needs and their lengths via tag 9F38 in SELECT AID response.
+     * Terminal must provide ALL requested data in exact order and length specified by card.
+     * 
+     * EMV SPEC: Book 3 - Application Specification, Section 6.5.8.3
+     * - PDOL format: Tag1 Length1 Tag2 Length2 ... (TLV structure without values)
+     * - Terminal response: 83 [total_length] [value1][value2]... (concatenated values, no tags)
+     * - Critical tags: 9F02 (Amount), 9F66 (TTQ), 9C (Transaction Type), 9F37 (Unpredictable Number)
+     * 
+     * PDOL Structure Example:
+     * ```
+     * Card requests (tag 9F38): 9F66049F02069F03069F1A0295055F2A029A039C019F37049F35019F4501
+     * Decoded PDOL:
+     *   9F66 04  - Terminal Transaction Qualifiers (4 bytes)
+     *   9F02 06  - Amount, Authorised (6 bytes, BCD)
+     *   9F03 06  - Amount, Other (6 bytes, BCD)
+     *   9F1A 02  - Terminal Country Code (2 bytes)
+     *   95 05    - Terminal Verification Results (5 bytes)
+     *   5F2A 02  - Transaction Currency Code (2 bytes)
+     *   9A 03    - Transaction Date (3 bytes, YYMMDD)
+     *   9C 01    - Transaction Type (1 byte)
+     *   9F37 04  - Unpredictable Number (4 bytes, random)
+     *   9F35 01  - Terminal Type (1 byte)
+     *   9F45 01  - Data Authentication Code (1 byte)
+     * 
+     * Terminal builds: 83 28 [B0000000][000000000100][000000000000][0840][0000000000][0840]
+     *                         [251207][00][12345678][22][00]
+     * ```
+     * 
+     * TTQ (Tag 9F66) - Terminal Transaction Qualifiers:
+     * - Indicates terminal capabilities and transaction flow
+     * - B0000000 = qVSDC (EMV mode with online PIN)
+     * - F0000000 = MSD (Mag-stripe mode, fallback)
+     * - E0000000 = CDA (Combined Data Authentication)
+     * - Controlled by: advancedTransactionType (user selection)
+     * 
+     * Amount (Tag 9F02):
+     * - BCD encoded: 000000000100 = 1.00 (last 2 digits = cents)
+     * - Controlled by: advancedAmount (user input, default "1.00")
+     * - Zero-padded to 6 bytes (12 hex digits)
+     * 
+     * Unpredictable Number (Tag 9F37):
+     * - Cryptographic nonce to prevent replay attacks
+     * - Generated by: TransactionParameterManager (random 4 bytes)
+     * - Changes for every transaction
+     * 
+     * @param dolEntries List of DolEntry objects parsed from card's PDOL (tag 9F38)
+     * @return ByteArray starting with 83 [length] followed by concatenated tag values
+     * @see TransactionParameterManager.getTerminalData for default values
+     * @see TransactionType for TTQ generation based on transaction mode
      */
     private fun buildPdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
         val dataList = mutableListOf<Byte>()
@@ -1404,11 +1795,68 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
     }
     
     /**
-     * Build dynamic CDOL data for GENERATE AC command
-     * Proxmark3-inspired: Uses terminal parameters + extracts card-specific data
+     * Build CDOL (Card Risk Management Data Object List) data for GENERATE AC command
      * 
-     * ENHANCEMENT: Uses TransactionParameterManager for terminal data,
-     * extracts ATC/IAD from previous responses for card-specific data
+     * CDOL is similar to PDOL but used for cryptogram generation (GENERATE AC, Phase 5).
+     * Card specifies required data via tags 8C (CDOL1) and 8D (CDOL2) in GPO response.
+     * Contains mix of terminal data (TVR, currency) and card data (ATC, IAD) from previous phases.
+     * 
+     * EMV SPEC: Book 3 - Section 6.5.5.4 (GENERATE AC Command)
+     * - CDOL1: Used for first GENERATE AC (request TC or ARQC)
+     * - CDOL2: Used for second GENERATE AC if issuer approves (online response)
+     * - Format: Concatenated values WITHOUT tag/length headers (same as PDOL)
+     * 
+     * CDOL Structure Example:
+     * ```
+     * Card requests (tag 8C): 9F02069F03069F1A0295055F2A029A039C019F37049F35019F45029F4C089F34
+     *   03                                                                                  
+     * Decoded CDOL1:
+     *   9F02 06  - Amount, Authorised
+     *   9F03 06  - Amount, Other (cashback)
+     *   9F1A 02  - Terminal Country Code
+     *   95 05    - Terminal Verification Results (TVR)
+     *   5F2A 02  - Transaction Currency Code
+     *   9A 03    - Transaction Date
+     *   9C 01    - Transaction Type
+     *   9F37 04  - Unpredictable Number
+     *   9F35 01  - Terminal Type
+     *   9F45 02  - Data Authentication Code
+     *   9F4C 08  - ICC Dynamic Number (from card)
+     *   9F34 03  - CVM Results
+     * 
+     * Terminal builds concatenated values (no tags):
+     * [000000000100][000000000000][0840][0000000000][0840][251207][00][12345678][22]
+     * [0000][1234567890ABCDEF][000000]
+     * ```
+     * 
+     * TVR (Tag 95) - Terminal Verification Results:
+     * - 5-byte bitmap indicating transaction verification status
+     * - Set by: TransactionParameterManager based on terminal decision
+     * - 0000000000 = TC (approve offline)
+     * - 0400000000 = ARQC (go online for issuer approval)
+     * - 8000000000 = AAC (decline offline)
+     * - Controlled by: advancedTerminalDecision (user selection)
+     * 
+     * ATC (Tag 9F36) - Application Transaction Counter:
+     * - Extracted from card's GPO or previous GENERATE AC response
+     * - Prevents replay attacks (increments each transaction)
+     * - Source: EmvResponseParser.extractAtc(apduLog)
+     * 
+     * IAD (Tag 9F10) - Issuer Application Data:
+     * - Card-specific cryptographic data from previous responses
+     * - Contains CVR (Card Verification Results) and other issuer params
+     * - Source: EmvResponseParser.extractIad(apduLog)
+     * 
+     * Terminal Decision Logic:
+     * - User selects: REQUEST_TC, REQUEST_ARQC, or FORCE_AAC
+     * - TVR bits set accordingly to signal card's cryptogram type
+     * - Card responds with TC (approve), ARQC (online), or AAC (decline)
+     * 
+     * @param dolEntries List of DolEntry objects parsed from card's CDOL1 (tag 8C) or CDOL2 (tag 8D)
+     * @return ByteArray of concatenated tag values (no TLV structure, raw data only)
+     * @see TerminalDecision for TVR generation based on approval/decline decision
+     * @see EmvResponseParser.extractAtc for ATC extraction from previous responses
+     * @see EmvResponseParser.extractIad for IAD extraction from GPO/GENERATE AC
      */
     private fun buildCdolData(dolEntries: List<EmvTlvParser.DolEntry>): ByteArray {
         val dataList = mutableListOf<Byte>()
@@ -1881,6 +2329,54 @@ class CardReadingViewModel(private val context: Context) : ViewModel() {
         return tags.toMap()
     }
     
+    /**
+     * Extract common EMV tags from hex response using regex pattern matching
+     * 
+     * Quick extraction utility for frequently-used EMV tags without full TLV parsing.
+     * Uses regex to find tag + length + value pattern in hex string response.
+     * Faster than EmvTlvParser for known single-level tags.
+     * 
+     * TLV Structure:
+     * ```
+     * Tag (1-2 bytes) | Length (1 byte) | Value (variable)
+     * Example: 5A 08 5413330000000001
+     *   5A = Tag (PAN)
+     *   08 = Length (8 bytes = 16 hex digits)
+     *   5413330000000001 = Value (PAN number)
+     * ```
+     * 
+     * Regex Pattern: "TAG([0-9A-F]{2})([0-9A-F]+)"
+     * - Group 1: Length byte (converted to int, then * 2 for hex digits)
+     * - Group 2: Value string (take first length*2 characters)
+     * 
+     * Common Tags Extracted:
+     * - 4F: AID (Application Identifier)
+     * - 50: Application Label (e.g., "VISA CREDIT")
+     * - 57: Track 2 Equivalent Data (PAN + expiry + service code)
+     * - 5A: PAN (Primary Account Number)
+     * - 5F24: Application Expiry Date (YYMMDD)
+     * - 82: AIP (Application Interchange Profile)
+     * - 84: DF Name (Selected application)
+     * - 94: AFL (Application File Locator)
+     * - 95: TVR (Terminal Verification Results)
+     * - 9F02: Amount, Authorised
+     * - 9F10: IAD (Issuer Application Data)
+     * - 9F26: AC (Application Cryptogram)
+     * - 9F27: CID (Cryptogram Information Data)
+     * - 9F36: ATC (Application Transaction Counter)
+     * - 9F37: Unpredictable Number
+     * - 9F66: TTQ (Terminal Transaction Qualifiers)
+     * 
+     * Limitations:
+     * - Only extracts first occurrence of each tag
+     * - Does not handle nested/constructed tags (use EmvTlvParser for those)
+     * - Does not validate tag structure or checksum
+     * - Assumes length byte < 128 (single-byte length encoding)
+     * 
+     * @param hexResponse Hex string APDU response (e.g., "6F1E8407A000...9000")
+     * @return Map of tag → value (e.g., {"5A" → "5413330000000001", "5F24" → "251231"})
+     * @see EmvTlvParser.parseResponse for comprehensive TLV parsing with nested tags
+     */
     private fun extractAllTagsFromResponse(hexResponse: String): Map<String, String> {
         val tags = mutableMapOf<String, String>()
         val commonTags = listOf("4F", "50", "57", "5A", "5F24", "5F25", "5F28", "5F2A", "5F30", 
